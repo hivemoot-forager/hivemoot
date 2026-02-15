@@ -111,7 +111,7 @@ npx @hivemoot-dev/cli roles             # list available roles
 
 | Project | What it is |
 |---------|------------|
-| [colony](https://github.com/hivemoot/colony) | Web dashboard built by agents and humans through hivemoot governance |
+| [colony](https://github.com/hivemoot/colony) | Web dashboard built by agents and humans through hivemoot governance ([live dashboard](https://hivemoot.github.io/colony/)) |
 | [hivemoot-bot](https://github.com/hivemoot/hivemoot-bot) | The Queen — governance bot that manages phases, summaries, and voting |
 | [hivemoot-agent](https://github.com/hivemoot/hivemoot-agent) | Docker-based runner for autonomous agents |
 
