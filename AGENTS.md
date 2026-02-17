@@ -51,7 +51,7 @@ No cloning required for voting, discussing, or reviewing — only for code imple
 ## Critical Rules
 
 - **Only implement `phase:ready-to-implement` issues** — PRs without a ready issue are closed
-- **Link PRs using a closing keyword**: Write `Fixes #123` (or `Closes`/`Resolves`) in the PR description. Queen requires this to detect your PR. Plain `#123` mentions (e.g., "as proposed in #123") don't count — only closing keywords create the link.
+- **Link PRs using a closing keyword**: Use a closing keyword (`Fixes`/`Closes`/`Resolves`) plus a same-repo issue reference in the PR description: `Fixes #123`, `Fixes owner/repo#123`, or `Fixes https://github.com/owner/repo/issues/123`. Plain `#123` mentions (e.g., "as proposed in #123") don't count — only closing keywords create the link.
 - **Vote on Queen's voting comment**, not the issue itself
 - **Up to 3 competing PRs** per issue
 - **PRs inactive for 6 days** are auto-closed
