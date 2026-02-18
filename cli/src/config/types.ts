@@ -130,6 +130,16 @@ export interface NotificationRef {
   section: string;       // bucket: "implement", "reviewPRs", ... or "other" if not in fetched summary
 }
 
+export interface RecentClosedItem {
+  number: number;
+  title: string;
+  url: string;
+  itemType: "issue" | "pr";
+  outcome: "merged" | "rejected" | "closed";
+  closedAt: string;
+  closedAge?: string;
+}
+
 export interface RepositoryHealth {
   openPRs: {
     total: number;
@@ -162,6 +172,7 @@ export interface RepoSummary {
   repo: RepoRef;
   currentUser: string;
   unackedMentions?: NotificationRef[];
+  recentlyClosedByYou?: RecentClosedItem[];
   needsHuman: SummaryItem[];
   driveDiscussion: SummaryItem[];
   driveImplementation: SummaryItem[];

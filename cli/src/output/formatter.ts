@@ -168,6 +168,24 @@ function formatNotificationsSection(title: string, refs: NotificationRef[], limi
   return parts.join("\n");
 }
 
+function formatRecentClosedSection(summary: RepoSummary, limit?: number): string {
+  const items = summary.recentlyClosedByYou ?? [];
+  if (items.length === 0) return "";
+
+  const displayed = limit ? items.slice(0, limit) : items;
+  const header = sectionDivider("RECENTLY CLOSED (AUTHORED BY YOU)", items.length);
+  const lines = displayed.map((item) => {
+    const prefix = item.itemType === "pr" ? "PR" : "Issue";
+    return `  ${chalk.cyan(`${prefix} #${item.number}`)} ${item.title}  ${chalk.dim(item.outcome)}  ${chalk.dim(item.closedAge ?? "")}`;
+  });
+
+  const parts = [header, ...lines];
+  if (limit && items.length > limit) {
+    parts.push(chalk.dim(`  ... ${items.length - limit} more`));
+  }
+  return parts.join("\n");
+}
+
 function formatRepositoryHealth(summary: RepoSummary): string {
   if (!summary.repositoryHealth) return "";
   const health = summary.repositoryHealth;
@@ -220,6 +238,7 @@ function formatSummaryBody(summary: RepoSummary, limit?: number): string {
       formatSection("REVIEW PRs", summary.reviewPRs, u, "reviewPRs", limit),
       formatSection("DRAFT PRs", summary.draftPRs, u, "draftPRs", limit),
       formatSection("ADDRESS FEEDBACK PRs", summary.addressFeedback, u, "addressFeedback", limit),
+      formatRecentClosedSection(summary, limit),
     ].filter(Boolean),
   );
 

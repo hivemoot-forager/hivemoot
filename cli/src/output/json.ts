@@ -15,6 +15,7 @@ function summaryPayload(summary: RepoSummary): Record<string, unknown> {
     reviewPRs: summary.reviewPRs,
     draftPRs: summary.draftPRs,
     addressFeedback: summary.addressFeedback,
+    recentlyClosedByYou: summary.recentlyClosedByYou ?? [],
     needsHuman: summary.needsHuman,
     repositoryHealth: summary.repositoryHealth,
     prioritySignals: summary.prioritySignals ?? [],
