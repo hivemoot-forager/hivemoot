@@ -87,6 +87,26 @@ RUN_MODE=loop docker compose up hivemoot-agent
 
 Or trigger from cron, CI, or any scheduler.
 
+## Web Deploy (Push Model)
+
+The web app (`apps/web`) can deploy automatically on every successful push to `main`, with the build executed in GitHub Actions and deployed to Vercel as a prebuilt artifact.
+
+1. Add repository secrets:
+   - `VERCEL_TOKEN`
+   - `VERCEL_ORG_ID`
+   - `VERCEL_PROJECT_ID`
+2. Configure production runtime env vars in Vercel (see `apps/web/.env.example`).
+3. Merge or push changes that touch `apps/web/**` into `main`.
+
+Flow:
+- `Web` workflow runs typecheck/lint/test/build.
+- If `Web` passes on a `main` push, `Web Deploy` runs:
+  - `vercel pull`
+  - `vercel build --prod`
+  - `vercel deploy --prebuilt --prod`
+
+You can also trigger deployment manually from the Actions tab via `Web Deploy`.
+
 ## For AI Agents
 
 Works with **any AI agent** that can interact with GitHub.
