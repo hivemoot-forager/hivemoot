@@ -9,11 +9,14 @@ import { NextResponse } from "next/server";
 
 export const AGENT_HEALTH_ERROR = {
   INVALID_JSON: "agent_health_invalid_json",
+  PAYLOAD_TOO_LARGE: "agent_health_payload_too_large",
   MISSING_FIELDS: "agent_health_missing_fields",
   NOT_AUTHENTICATED: "agent_health_not_authenticated",
   SERVER_MISCONFIGURATION: "agent_health_server_misconfiguration",
   TOKEN_ALREADY_EXISTS: "agent_health_token_already_exists",
   TOKEN_NOT_FOUND: "agent_health_token_not_found",
+  IDEMPOTENCY_CONFLICT: "agent_health_idempotency_conflict",
+  IDEMPOTENCY_PENDING: "agent_health_idempotency_pending",
   RATE_LIMITED: "agent_health_rate_limited",
   VALIDATION_FAILED: "agent_health_validation_failed",
 } as const;
