@@ -10,10 +10,12 @@ import {
   deleteTask,
   getTaskMessages,
   MAX_CONCURRENT_TASKS,
+  heartbeatTask,
   markTaskRunning,
   requestFollowUp,
   resumeTaskWithFollowUp,
   retryTask,
+  verifyTaskClaimToken,
   setTaskProgress,
   failTask,
   getTask,
@@ -389,10 +391,133 @@ describe("task lifecycle", () => {
     redis._kv.set(taskKey, {
       ...stored,
       started_at: "2020-01-01T00:00:00.000Z",
+      updated_at: "2020-01-01T00:00:00.000Z",
     });
 
     const timedOut = await getTask("inst-1", created.task.task_id, redis);
     expect(timedOut?.status).toBe("timed_out");
+  });
+
+  it("extends timeout window from latest heartbeat", async () => {
+    const created = await createTask(
+      "inst-1",
+      "queen",
+      {
+        prompt: "Task",
+        repos: ["hivemoot/hivemoot"],
+        timeout_secs: 1,
+      },
+      redis,
+    );
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await markTaskRunning("inst-1", created.task.task_id, redis);
+
+    const taskKey = `task:inst-1:${created.task.task_id}`;
+    const stored = redis._kv.get(taskKey) as {
+      started_at?: string;
+      updated_at: string;
+    };
+
+    redis._kv.set(taskKey, {
+      ...stored,
+      started_at: "2020-01-01T00:00:00.000Z",
+      updated_at: "2020-01-01T00:00:00.000Z",
+    });
+
+    const heartbeat = await heartbeatTask("inst-1", created.task.task_id, redis);
+    expect(heartbeat.ok).toBe(true);
+
+    const stillRunning = await getTask("inst-1", created.task.task_id, redis);
+    expect(stillRunning?.status).toBe("running");
+
+    const refreshed = redis._kv.get(taskKey) as {
+      started_at?: string;
+      updated_at: string;
+    };
+    redis._kv.set(taskKey, {
+      ...refreshed,
+      updated_at: "2020-01-01T00:00:00.000Z",
+    });
+
+    const timedOut = await getTask("inst-1", created.task.task_id, redis);
+    expect(timedOut?.status).toBe("timed_out");
+  });
+
+  it("prevents stale heartbeat writes from resurrecting a finalized task", async () => {
+    const created = await createTask(
+      "inst-1",
+      "queen",
+      {
+        prompt: "Task",
+        repos: ["hivemoot/hivemoot"],
+        timeout_secs: 300,
+      },
+      redis,
+    );
+
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await markTaskRunning("inst-1", created.task.task_id, redis);
+
+    const taskStorageKey = `task:inst-1:${created.task.task_id}`;
+    let heartbeatWriteBlocked = false;
+    let signalHeartbeatBlocked!: () => void;
+    let releaseHeartbeatWrite!: () => void;
+    const heartbeatBlocked = new Promise<void>((resolve) => {
+      signalHeartbeatBlocked = resolve;
+    });
+    const heartbeatWriteReleased = new Promise<void>((resolve) => {
+      releaseHeartbeatWrite = resolve;
+    });
+
+    const setSpy = vi.spyOn(redis, "set");
+    const baseSet = setSpy.getMockImplementation();
+    if (!baseSet) {
+      throw new Error("Expected mocked redis.set implementation");
+    }
+
+    setSpy.mockImplementation(async (...args) => {
+      const [key, value, opts] = args;
+      if (
+        !heartbeatWriteBlocked
+        && key === taskStorageKey
+        && (!opts || typeof opts !== "object" || !("nx" in opts) || opts.nx !== true)
+        && typeof value === "object"
+        && value !== null
+        && (value as { status?: string }).status === "running"
+      ) {
+        heartbeatWriteBlocked = true;
+        signalHeartbeatBlocked();
+        await heartbeatWriteReleased;
+      }
+
+      return baseSet(...args);
+    });
+
+    const heartbeatPromise = heartbeatTask("inst-1", created.task.task_id, redis);
+    await heartbeatBlocked;
+    const completePromise = completeTask("inst-1", created.task.task_id, "done", redis);
+
+    releaseHeartbeatWrite();
+
+    const [heartbeatResult, completeResult] = await Promise.all([
+      heartbeatPromise,
+      completePromise,
+    ]);
+
+    expect(completeResult.ok).toBe(true);
+    expect(
+      heartbeatResult.ok
+      || (!heartbeatResult.ok && heartbeatResult.reason === "invalid_transition"),
+    ).toBe(true);
+
+    const finalTask = await getTask("inst-1", created.task.task_id, redis);
+    expect(finalTask?.status).toBe("completed");
+    expect(redis._zsets.get("tasks:running:inst-1")?.has(created.task.task_id)).toBe(false);
   });
 
   it("lists recent tasks", async () => {
@@ -452,8 +577,18 @@ describe("task lifecycle", () => {
 
     const claimed = await claimNextPendingTask("inst-1", redis);
     expect(claimed).not.toBeNull();
-    expect(claimed?.status).toBe("running");
-    expect(claimed?.task_id).toBe(first.task.task_id);
+    expect(claimed?.task.status).toBe("running");
+    expect(claimed?.task.task_id).toBe(first.task.task_id);
+    expect(claimed?.claim_token).toMatch(/^[a-f0-9]{64}$/);
+
+    if (claimed) {
+      await expect(
+        verifyTaskClaimToken("inst-1", claimed.task.task_id, claimed.claim_token, redis),
+      ).resolves.toBe(true);
+      await expect(
+        verifyTaskClaimToken("inst-1", claimed.task.task_id, "bad-token", redis),
+      ).resolves.toBe(false);
+    }
   });
 
   it("does not allow two parallel claimers to claim the same task", async () => {
@@ -478,7 +613,7 @@ describe("task lifecycle", () => {
 
     const successfulClaims = [firstClaim, secondClaim].filter((task) => task !== null);
     expect(successfulClaims).toHaveLength(1);
-    expect(successfulClaims[0]?.task_id).toBe(created.task.task_id);
+    expect(successfulClaims[0]?.task.task_id).toBe(created.task.task_id);
   });
 
   it("returns null when there are no pending tasks to claim", async () => {
@@ -564,8 +699,13 @@ describe("follow-up workflow", () => {
     // Executor claims task again.
     const claimed = await claimNextPendingTask("inst-1", redis);
     expect(claimed).not.toBeNull();
-    expect(claimed?.task_id).toBe(task.task_id);
-    expect(claimed?.status).toBe("running");
+    expect(claimed?.task.task_id).toBe(task.task_id);
+    expect(claimed?.task.status).toBe("running");
+    if (claimed) {
+      await expect(
+        verifyTaskClaimToken("inst-1", claimed.task.task_id, claimed.claim_token, redis),
+      ).resolves.toBe(true);
+    }
   });
 
   it("rejects follow-up request from non-running task", async () => {
@@ -642,6 +782,11 @@ describe("follow-up workflow", () => {
     await resumeTaskWithFollowUp("inst-1", task.task_id, "Info provided", redis);
     const claimed = await claimNextPendingTask("inst-1", redis);
     expect(claimed).not.toBeNull();
+    if (claimed) {
+      await expect(
+        verifyTaskClaimToken("inst-1", claimed.task.task_id, claimed.claim_token, redis),
+      ).resolves.toBe(true);
+    }
     await completeTask("inst-1", task.task_id, "Done", redis);
 
     // Now try follow-up on completed task.
@@ -937,6 +1082,48 @@ describe("post-transition append failure resilience", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.task.status).toBe("completed");
+  });
+
+  it("invalidates claim token after follow-up and terminal transitions", async () => {
+    const created = await createTask(
+      "inst-1",
+      "queen",
+      {
+        prompt: "Investigate",
+        repos: ["hivemoot/hivemoot"],
+        timeout_secs: 300,
+      },
+      redis,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    const firstClaim = await claimNextPendingTask("inst-1", redis);
+    expect(firstClaim).not.toBeNull();
+    if (!firstClaim) return;
+
+    await expect(
+      verifyTaskClaimToken("inst-1", firstClaim.task.task_id, firstClaim.claim_token, redis),
+    ).resolves.toBe(true);
+
+    await requestFollowUp("inst-1", firstClaim.task.task_id, "Need context", redis);
+    await expect(
+      verifyTaskClaimToken("inst-1", firstClaim.task.task_id, firstClaim.claim_token, redis),
+    ).resolves.toBe(false);
+
+    await resumeTaskWithFollowUp("inst-1", firstClaim.task.task_id, "Context provided", redis);
+    const secondClaim = await claimNextPendingTask("inst-1", redis);
+    expect(secondClaim).not.toBeNull();
+    if (!secondClaim) return;
+    expect(secondClaim.claim_token).not.toBe(firstClaim.claim_token);
+    await expect(
+      verifyTaskClaimToken("inst-1", secondClaim.task.task_id, secondClaim.claim_token, redis),
+    ).resolves.toBe(true);
+
+    await completeTask("inst-1", secondClaim.task.task_id, "Done", redis);
+    await expect(
+      verifyTaskClaimToken("inst-1", secondClaim.task.task_id, secondClaim.claim_token, redis),
+    ).resolves.toBe(false);
   });
 });
 
