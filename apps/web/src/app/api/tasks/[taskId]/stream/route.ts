@@ -2,7 +2,7 @@ import { NextRequest } from "next/server";
 import { authenticateByokRequest } from "@/server/byok-auth";
 import { TASK_ERROR, taskError } from "@/server/task-error";
 import { extractTaskId } from "@/server/task-route-utils";
-import { getTask, TASK_ID_PATTERN, type TaskRecord } from "@/server/task-store";
+import { getTask, TASK_ID_PATTERN, type TaskStatus } from "@/server/task-store";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +14,12 @@ function sseEvent(event: string, data: unknown): string {
   return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
-function isTerminal(status: TaskRecord["status"]): boolean {
+function isTerminal(status: TaskStatus): boolean {
   return status === "completed" || status === "failed" || status === "timed_out";
+}
+
+function shouldCloseStream(status: TaskStatus): boolean {
+  return isTerminal(status) || status === "needs_follow_up";
 }
 
 export async function GET(request: NextRequest) {
@@ -93,7 +97,7 @@ export async function GET(request: NextRequest) {
             lastHeartbeatAt = now;
           }
 
-          if (isTerminal(currentTask.status)) {
+          if (shouldCloseStream(currentTask.status)) {
             send("done", { task: currentTask });
             close();
             return;
@@ -120,7 +124,7 @@ export async function GET(request: NextRequest) {
       };
 
       send("snapshot", { task: initialTask });
-      if (isTerminal(initialTask.status)) {
+      if (shouldCloseStream(initialTask.status)) {
         send("done", { task: initialTask });
         close();
         return;
