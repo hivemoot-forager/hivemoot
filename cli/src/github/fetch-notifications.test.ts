@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { CliError } from "../config/types.js";
 
-vi.mock("./client.js", () => ({
-  gh: vi.fn(),
-}));
+vi.mock("./client.js", async (importActual) => {
+  const actual = await importActual<typeof import("./client.js")>();
+  return { ...actual, gh: vi.fn() };
+});
 
 vi.mock("../watch/state.js", () => ({
   loadState: vi.fn(),
