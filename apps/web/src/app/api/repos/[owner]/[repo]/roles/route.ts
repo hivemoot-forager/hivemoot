@@ -24,6 +24,7 @@ import {
   readRepoFile,
   getBranchSha,
   createBranch,
+  resetBranchToSha,
   writeFileToBranch,
   listOpenPRsForBranch,
   createPullRequest,
@@ -297,14 +298,22 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Ensure the edit branch exists. Only create it when there's no existing PR;
+    // Ensure the edit branch exists. Only create/reset it when there's no existing PR;
     // if a PR is already open, the branch exists and may be ahead of main.
     if (!editPR) {
       const mainSha = await getBranchSha(owner, repo, "main", installationToken);
       if (!mainSha) {
         return repoError("server_error", "Could not resolve main branch SHA", 500);
       }
-      await createBranch(owner, repo, ROLE_EDIT_BRANCH, mainSha, installationToken);
+      // Try to force-reset the branch to main first. If it doesn't exist yet,
+      // resetBranchToSha returns null and we create it fresh. This handles the
+      // stale-branch case where a previous hivemoot-role-edits PR was merged/
+      // closed but the branch was not deleted: createBranch would throw because
+      // the stale branch tip diverges from mainSha.
+      const reset = await resetBranchToSha(owner, repo, ROLE_EDIT_BRANCH, mainSha, installationToken);
+      if (reset === null) {
+        await createBranch(owner, repo, ROLE_EDIT_BRANCH, mainSha, installationToken);
+      }
     }
 
     // Write the updated config to the edit branch.

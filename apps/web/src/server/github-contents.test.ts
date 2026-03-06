@@ -3,6 +3,7 @@ import {
   readRepoFile,
   getBranchSha,
   createBranch,
+  resetBranchToSha,
   writeFileToBranch,
   listOpenPRsForBranch,
   createPullRequest,
@@ -166,6 +167,41 @@ describe("createBranch", () => {
     await expect(
       createBranch("owner", "repo", "my-branch", "base-sha", TOKEN),
     ).rejects.toThrow("already exists at other-sha");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resetBranchToSha
+// ---------------------------------------------------------------------------
+
+describe("resetBranchToSha", () => {
+  it("force-patches the branch ref and returns updated info", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    let capturedUrl = "";
+    mockFetch((url, init) => {
+      capturedUrl = url;
+      capturedBody = JSON.parse(init?.body as string);
+      return jsonResponse({ ref: "refs/heads/my-branch", object: { sha: "new-sha" } });
+    });
+
+    const result = await resetBranchToSha("owner", "repo", "my-branch", "new-sha", TOKEN);
+    expect(result).toEqual({ ref: "refs/heads/my-branch", sha: "new-sha" });
+    expect(capturedUrl).toContain("/git/refs/heads/my-branch");
+    expect(capturedBody.sha).toBe("new-sha");
+    expect(capturedBody.force).toBe(true);
+  });
+
+  it("returns null when the branch does not exist (422)", async () => {
+    mockFetch(() => new Response(null, { status: 422 }));
+    const result = await resetBranchToSha("owner", "repo", "nonexistent", "sha", TOKEN);
+    expect(result).toBeNull();
+  });
+
+  it("throws on API errors", async () => {
+    mockFetch(() => new Response(null, { status: 500 }));
+    await expect(resetBranchToSha("owner", "repo", "my-branch", "sha", TOKEN)).rejects.toThrow(
+      "GitHub reset branch failed: 500",
+    );
   });
 });
 

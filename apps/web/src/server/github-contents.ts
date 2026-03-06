@@ -164,6 +164,47 @@ export async function createBranch(
   return { ref: data.ref, sha: data.object.sha };
 }
 
+/**
+ * Force-resets a branch to `targetSha`.
+ *
+ * Use this to reclaim a stale branch (e.g. one left over from a previously
+ * merged edit PR) without deleting and recreating it. Sets `force: true`
+ * so the update succeeds even when `targetSha` is not a descendant of the
+ * current branch tip.
+ *
+ * Returns `null` when the branch does not exist (treat as a no-op and call
+ * `createBranch` instead).
+ */
+export async function resetBranchToSha(
+  owner: string,
+  repo: string,
+  branch: string,
+  targetSha: string,
+  token: string,
+): Promise<BranchInfo | null> {
+  const response = await fetch(
+    `${GH_API}/repos/${owner}/${repo}/git/refs/heads/${branch}`,
+    {
+      method: "PATCH",
+      headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+      body: JSON.stringify({ sha: targetSha, force: true }),
+    },
+  );
+
+  if (response.status === 422) {
+    // 422 from PATCH means the ref doesn't exist.
+    return null;
+  }
+  if (!response.ok) {
+    throw new Error(
+      `GitHub reset branch failed: ${response.status} on ${owner}/${repo} heads/${branch}`,
+    );
+  }
+
+  const data = (await response.json()) as { ref: string; object: { sha: string } };
+  return { ref: data.ref, sha: data.object.sha };
+}
+
 // ---------------------------------------------------------------------------
 // Write
 // ---------------------------------------------------------------------------
