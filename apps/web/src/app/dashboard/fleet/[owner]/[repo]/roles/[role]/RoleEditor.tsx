@@ -41,7 +41,7 @@ export function RoleEditor({
   const [conflictMessage, setConflictMessage] = useState("");
   const [prUrl, setPrUrl] = useState<string | null>(null);
 
-  function loadRoles() {
+  function loadRoles({ preserveDraft = false } = {}) {
     setLoad({ kind: "loading" });
     fetch(`/api/repos/${owner}/${repo}/roles`)
       .then((res) => {
@@ -52,8 +52,10 @@ export function RoleEditor({
         const role = data.roles.find((r) => r.name === roleName);
         if (!role) throw new Error(`Role "${roleName}" not found in config`);
         setLoad({ kind: "loaded", role, fileSha: data.fileSha, source: data.source });
-        setDescription(role.description);
-        setInstructions(role.instructions);
+        if (!preserveDraft) {
+          setDescription(role.description);
+          setInstructions(role.instructions);
+        }
       })
       .catch((err: Error) => setLoad({ kind: "error", message: err.message }));
   }
@@ -121,8 +123,8 @@ export function RoleEditor({
   function handleConflictReload() {
     setSaveState("idle");
     setConflictMessage("");
-    // Keep the user's typed text — they'll need to decide what to merge.
-    loadRoles();
+    // Refresh fileSha from GitHub while keeping the user's draft edits.
+    loadRoles({ preserveDraft: true });
   }
 
   if (load.kind === "loading") {
