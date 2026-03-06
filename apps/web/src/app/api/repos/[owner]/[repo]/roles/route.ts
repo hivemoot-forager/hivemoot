@@ -23,6 +23,7 @@ import { generateAppJwt, generateInstallationToken } from "@/server/github-auth"
 import {
   readRepoFile,
   getBranchSha,
+  getDefaultBranch,
   createBranch,
   resetBranchToSha,
   writeFileToBranch,
@@ -192,7 +193,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const source = editPR ? `pending-pr:${editPR.number}` : "main";
+    const defaultBranch = await getDefaultBranch(owner, repo, installationToken);
+    const source = editPR ? `pending-pr:${editPR.number}` : defaultBranch;
     const body: RolesResponse = { roles, fileSha: file.sha, source };
     return NextResponse.json(body);
   } catch (error) {
@@ -299,20 +301,22 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
     }
 
     // Ensure the edit branch exists. Only create/reset it when there's no existing PR;
-    // if a PR is already open, the branch exists and may be ahead of main.
+    // if a PR is already open, the branch exists and may be ahead of the default branch.
+    let defaultBranch: string | undefined;
     if (!editPR) {
-      const mainSha = await getBranchSha(owner, repo, "main", installationToken);
-      if (!mainSha) {
-        return repoError("server_error", "Could not resolve main branch SHA", 500);
+      defaultBranch = await getDefaultBranch(owner, repo, installationToken);
+      const baseSha = await getBranchSha(owner, repo, defaultBranch, installationToken);
+      if (!baseSha) {
+        return repoError("server_error", `Could not resolve ${defaultBranch} branch SHA`, 500);
       }
-      // Try to force-reset the branch to main first. If it doesn't exist yet,
-      // resetBranchToSha returns null and we create it fresh. This handles the
-      // stale-branch case where a previous hivemoot-role-edits PR was merged/
-      // closed but the branch was not deleted: createBranch would throw because
-      // the stale branch tip diverges from mainSha.
-      const reset = await resetBranchToSha(owner, repo, ROLE_EDIT_BRANCH, mainSha, installationToken);
+      // Try to force-reset the branch to the default branch first. If it doesn't exist
+      // yet, resetBranchToSha returns null and we create it fresh. This handles the
+      // stale-branch case where a previous hivemoot-role-edits PR was merged/closed
+      // but the branch was not deleted: createBranch would throw because the stale
+      // branch tip diverges from baseSha.
+      const reset = await resetBranchToSha(owner, repo, ROLE_EDIT_BRANCH, baseSha, installationToken);
       if (reset === null) {
-        await createBranch(owner, repo, ROLE_EDIT_BRANCH, mainSha, installationToken);
+        await createBranch(owner, repo, ROLE_EDIT_BRANCH, baseSha, installationToken);
       }
     }
 
@@ -342,6 +346,7 @@ export async function PUT(request: NextRequest): Promise<NextResponse> {
         ROLE_EDIT_BRANCH,
         `This PR was opened automatically by hivemoot.dev.\n\nUpdates role instructions in \`${HIVEMOOT_CONFIG_PATH}\`. Review and merge to apply.`,
         installationToken,
+        defaultBranch!,
       );
       prNumber = newPR.number;
       prUrl = newPR.url;

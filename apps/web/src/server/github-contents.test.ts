@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   readRepoFile,
   getBranchSha,
+  getDefaultBranch,
   createBranch,
   resetBranchToSha,
   writeFileToBranch,
@@ -303,11 +304,36 @@ describe("listOpenPRsForBranch", () => {
 });
 
 // ---------------------------------------------------------------------------
+// getDefaultBranch
+// ---------------------------------------------------------------------------
+
+describe("getDefaultBranch", () => {
+  it("returns the default_branch field from the repo response", async () => {
+    mockFetch(() => jsonResponse({ default_branch: "trunk" }));
+    const branch = await getDefaultBranch("owner", "repo", TOKEN);
+    expect(branch).toBe("trunk");
+  });
+
+  it("returns 'main' when default branch is main", async () => {
+    mockFetch(() => jsonResponse({ default_branch: "main" }));
+    const branch = await getDefaultBranch("owner", "repo", TOKEN);
+    expect(branch).toBe("main");
+  });
+
+  it("throws on API error", async () => {
+    mockFetch(() => new Response(null, { status: 404 }));
+    await expect(getDefaultBranch("owner", "repo", TOKEN)).rejects.toThrow(
+      "GitHub repo lookup failed: 404",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // createPullRequest
 // ---------------------------------------------------------------------------
 
 describe("createPullRequest", () => {
-  it("creates a PR and returns the mapped object", async () => {
+  it("creates a PR targeting the specified base branch", async () => {
     let capturedBody: Record<string, unknown> = {};
     mockFetch((_url, init) => {
       capturedBody = JSON.parse(init?.body as string);
@@ -326,6 +352,7 @@ describe("createPullRequest", () => {
       "edit-roles",
       "Updates to role instructions",
       TOKEN,
+      "main",
     );
 
     expect(pr.number).toBe(99);
@@ -334,10 +361,26 @@ describe("createPullRequest", () => {
     expect(capturedBody.head).toBe("edit-roles");
   });
 
+  it("uses the provided base branch (not always 'main')", async () => {
+    let capturedBody: Record<string, unknown> = {};
+    mockFetch((_url, init) => {
+      capturedBody = JSON.parse(init?.body as string);
+      return jsonResponse({
+        number: 100,
+        title: "Edit roles",
+        head: { label: "owner:edit-roles" },
+        html_url: "https://github.com/owner/repo/pull/100",
+      });
+    });
+
+    await createPullRequest("owner", "repo", "Edit roles", "edit-roles", "body", TOKEN, "master");
+    expect(capturedBody.base).toBe("master");
+  });
+
   it("throws on failure", async () => {
     mockFetch(() => new Response("Unprocessable", { status: 422 }));
     await expect(
-      createPullRequest("owner", "repo", "title", "branch", "body", TOKEN),
+      createPullRequest("owner", "repo", "title", "branch", "body", TOKEN, "main"),
     ).rejects.toThrow("GitHub create PR failed: 422");
   });
 });

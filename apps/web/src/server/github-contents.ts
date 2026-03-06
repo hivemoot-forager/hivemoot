@@ -251,6 +251,31 @@ export async function writeFileToBranch(
 // ---------------------------------------------------------------------------
 
 /**
+ * Returns the default branch name for a repository (e.g. "main", "master", "trunk").
+ *
+ * Uses the GitHub Repos API so we never assume a hardcoded branch name.
+ * Throws on API errors.
+ */
+export async function getDefaultBranch(
+  owner: string,
+  repo: string,
+  token: string,
+): Promise<string> {
+  const response = await fetch(`${GH_API}/repos/${owner}/${repo}`, {
+    headers: ghHeaders(token),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      `GitHub repo lookup failed: ${response.status} on ${owner}/${repo}`,
+    );
+  }
+
+  const data = (await response.json()) as { default_branch: string };
+  return data.default_branch;
+}
+
+/**
  * Lists open PRs where the head branch matches `headBranch`.
  *
  * `headBranch` should be the unqualified branch name (e.g. "my-edits"),
@@ -288,7 +313,10 @@ export async function listOpenPRsForBranch(
 }
 
 /**
- * Opens a pull request from `headBranch` into `base` (defaults to "main").
+ * Opens a pull request from `headBranch` into `base`.
+ *
+ * `base` must be the repo's actual default branch name — use `getDefaultBranch`
+ * to resolve it rather than assuming "main".
  */
 export async function createPullRequest(
   owner: string,
@@ -297,7 +325,7 @@ export async function createPullRequest(
   headBranch: string,
   body: string,
   token: string,
-  base = "main",
+  base: string,
 ): Promise<OpenPR> {
   const response = await fetch(`${GH_API}/repos/${owner}/${repo}/pulls`, {
     method: "POST",
