@@ -5,26 +5,7 @@ import Markdown, { type ExtraProps } from "react-markdown";
 import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { draftStorageKey, filterDuplicatePrompt, isSubmitShortcut } from "../task-helpers";
-import type { TaskMessage } from "../task-helpers";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface TaskRecord {
-  task_id: string;
-  status: string;
-  prompt: string;
-  repos: string[];
-  timeout_secs: number;
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-  started_at?: string;
-  finished_at?: string;
-  error?: string;
-  progress?: string;
-}
+import { type TaskMessage, type TaskRecord } from "../types";
 
 // ---------------------------------------------------------------------------
 // Icons

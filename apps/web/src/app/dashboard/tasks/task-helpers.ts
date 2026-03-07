@@ -1,15 +1,7 @@
 // Pure helpers shared by TaskDetail and TasksDashboard.
 // Extracted so they can be unit-tested without a DOM environment.
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface TaskMessage {
-  role: "user" | "agent" | "system";
-  content: string;
-  created_at: string;
-}
+import type { TaskMessage } from "./types";
+export type { TaskMessage } from "./types";
 
 // ---------------------------------------------------------------------------
 // First-message deduplication
