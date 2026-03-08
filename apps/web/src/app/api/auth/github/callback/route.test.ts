@@ -90,7 +90,7 @@ beforeEach(() => {
   vi.mocked(exchangeOAuthCode).mockResolvedValue("user-token");
   vi.mocked(getAuthenticatedUser).mockResolvedValue({ login: "alice", id: 1 });
   vi.mocked(validateOAuthState).mockImplementation(async (_state, stateBinding) => (
-    stateBinding === "binding-cookie" ? "12345" : null
+    stateBinding === "binding-cookie" ? { installationId: "12345" } : null
   ));
   vi.mocked(createSetupSession).mockResolvedValue("session-token-abc");
   vi.mocked(hasByokEnvelope).mockResolvedValue(false);
@@ -245,7 +245,7 @@ describe("GET /api/auth/github/callback — rejections", () => {
   it("cross-installation write attempt is blocked (installationId from state, not URL)", async () => {
     // Attacker sets state=legit-state but the URL has a different installation_id.
     // The route ignores any installation_id in the URL and uses only the one from Redis state.
-    vi.mocked(validateOAuthState).mockResolvedValue("VICTIM_INSTALL");
+    vi.mocked(validateOAuthState).mockResolvedValue({ installationId: "VICTIM_INSTALL" });
     vi.mocked(getInstallation).mockResolvedValue({
       account: { login: "alice", type: "User" },
     });
@@ -349,7 +349,7 @@ describe("GET /api/auth/github/callback — discovery flow", () => {
   beforeEach(() => {
     // State returns the discover sentinel instead of a numeric installation ID
     vi.mocked(validateOAuthState).mockImplementation(async (_state, stateBinding) => (
-      stateBinding === "binding-cookie" ? "discover" : null
+      stateBinding === "binding-cookie" ? { installationId: "discover" } : null
     ));
   });
 
@@ -425,7 +425,7 @@ describe("GET /api/auth/github/callback — discovery flow", () => {
 
   it("does not set installation_id on denied redirect from discovery flow", async () => {
     vi.mocked(validateOAuthState).mockImplementation(async (_state, stateBinding) => (
-      stateBinding === "binding-cookie" ? "discover" : null
+      stateBinding === "binding-cookie" ? { installationId: "discover" } : null
     ));
 
     const req = makeRequestWithCookie(
