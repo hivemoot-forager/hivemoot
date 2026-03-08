@@ -27,10 +27,11 @@ const OAUTH_STATE_COOKIE_MAX_AGE = 600;
 
 /**
  * Validates that `next` is a safe same-origin path.
- * Blocks protocol-relative URLs (//evil.com) and absolute URLs.
+ * Blocks protocol-relative URLs (//evil.com), backslash-relative URLs (/\evil.com),
+ * and absolute URLs.
  */
 function isSafeNextPath(next: string): boolean {
-  return next.startsWith("/") && !next.startsWith("//");
+  return next.startsWith("/") && !next.startsWith("//") && !next.includes("\\");
 }
 
 export async function GET(request: NextRequest) {

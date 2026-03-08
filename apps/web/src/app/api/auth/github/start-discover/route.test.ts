@@ -163,6 +163,12 @@ describe("GET /api/auth/github/start-discover", () => {
     await GET(req);
     expect(createOAuthState).toHaveBeenCalledWith("discover", expect.anything(), undefined);
   });
+
+  it("ignores unsafe next params (backslash-relative URLs)", async () => {
+    const req = makeRequest("?next=/\\evil.com/steal");
+    await GET(req);
+    expect(createOAuthState).toHaveBeenCalledWith("discover", expect.anything(), undefined);
+  });
 });
 
 describe("GET /api/auth/github/start-discover — fast-path (valid session)", () => {
