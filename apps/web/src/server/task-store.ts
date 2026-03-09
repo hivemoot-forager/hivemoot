@@ -1107,6 +1107,10 @@ export async function retryTask(
         .persist(taskKey(installationId, taskId))
         .persist(taskProgressKey(installationId, taskId))
         .persist(taskMessagesKey(installationId, taskId))
+        // Clear artifacts from the previous attempt — retry is a clean slate.
+        // The terminal TTL set by finalizeTask would otherwise fire mid-retry
+        // and silently drop the stale artifact list.
+        .del(taskArtifactsKey(installationId, taskId))
         .set(taskKey(installationId, taskId), nextStored)
         .set(taskProgressKey(installationId, taskId), progress)
         .zrem(runningKey(installationId), taskId)
@@ -1468,11 +1472,16 @@ export async function addUserMessage(
 
       // Clear terminal TTLs in the same transaction as the state transition so
       // success guarantees the revived task will not expire mid-run.
+      // Artifacts are preserved (not cleared) — follow-up messages continue the
+      // conversation and prior-run outputs remain relevant context. Without
+      // persist(), the terminal TTL set by finalizeTask fires mid-run and drops
+      // the artifact list from under the active task.
       await redis
         .multi()
         .persist(taskKey(installationId, taskId))
         .persist(taskProgressKey(installationId, taskId))
         .persist(taskMessagesKey(installationId, taskId))
+        .persist(taskArtifactsKey(installationId, taskId))
         .set(taskKey(installationId, taskId), nextStored)
         .set(taskProgressKey(installationId, taskId), "Re-queued with new message")
         .zadd(pendingKey(installationId), { score: Date.now(), member: taskId })

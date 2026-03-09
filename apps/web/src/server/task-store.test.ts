@@ -53,6 +53,7 @@ function makeMockRedis() {
       for (const key of keys) {
         if (kv.delete(key)) removed += 1;
         ttl.delete(key);
+        lists.delete(key);
       }
       return removed;
     }),
@@ -1631,6 +1632,38 @@ describe("retryTask", () => {
     const result = await retryTask("inst-1", "aabbccddeeff001122334455", redis);
     expect(result).toEqual({ ok: false, reason: "not_found" });
   });
+
+  it("clears artifacts from the previous run on retry (per-attempt isolation)", async () => {
+    const created = await createTask(
+      "inst-1",
+      "queen",
+      { prompt: "Artifact test", repos: ["hivemoot/hivemoot"], timeout_secs: 300 },
+      redis,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await markTaskRunning("inst-1", created.task.task_id, redis);
+    // Attach an artifact from the first run.
+    await appendTaskArtifacts(
+      "inst-1",
+      created.task.task_id,
+      [{ type: "pull_request", url: "https://github.com/hivemoot/hivemoot/pull/99", number: 99 }],
+      redis,
+    );
+    await failTask("inst-1", created.task.task_id, "boom", redis);
+
+    // Artifacts from the failed run should be visible before retry.
+    const taskBefore = await getTask("inst-1", created.task.task_id, redis);
+    expect(taskBefore?.artifacts).toHaveLength(1);
+
+    const retried = await retryTask("inst-1", created.task.task_id, redis);
+    expect(retried.ok).toBe(true);
+
+    // Artifacts should be cleared — the new run starts clean.
+    const taskAfter = await getTask("inst-1", created.task.task_id, redis);
+    expect(taskAfter?.artifacts ?? []).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1957,6 +1990,40 @@ describe("addUserMessage", () => {
     const userMsg = messages[messages.length - 2];
     expect(userMsg.role).toBe("user");
     expect(userMsg.content).toBe("Do more");
+  });
+
+  it("persists artifacts key when reviving a terminal task (prevents mid-run TTL drop)", async () => {
+    const created = await createTask(
+      "inst-1",
+      "queen",
+      { prompt: "Task with artifacts", repos: ["hivemoot/hivemoot"], timeout_secs: 300 },
+      redis,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+
+    await markTaskRunning("inst-1", created.task.task_id, redis);
+    // Attach an artifact during the run.
+    await appendTaskArtifacts(
+      "inst-1",
+      created.task.task_id,
+      [{ type: "issue", url: "https://github.com/hivemoot/hivemoot/issues/7", number: 7 }],
+      redis,
+    );
+    await completeTask("inst-1", created.task.task_id, "Done", redis);
+
+    // finalizeTask sets a TTL on the artifacts key.
+    const artifactsKey = `task:inst-1:${created.task.task_id}:artifacts`;
+    expect(redis._ttl.has(artifactsKey)).toBe(true);
+
+    // Sending a follow-up message revives the task — artifacts should be preserved
+    // and the terminal TTL removed so they survive the new run.
+    await addUserMessage("inst-1", created.task.task_id, "Do more", redis);
+
+    expect(redis._ttl.has(artifactsKey)).toBe(false);
+    const taskAfter = await getTask("inst-1", created.task.task_id, redis);
+    expect(taskAfter?.artifacts).toHaveLength(1);
+    expect(taskAfter?.artifacts?.[0].number).toBe(7);
   });
 });
 
