@@ -33,6 +33,15 @@ export interface TaskMessage {
 const MAX_MESSAGE_CONTENT_CHARS = 128_000;
 const MAX_MESSAGES_PER_TASK = 200;
 
+export interface TaskArtifact {
+  type: "pull_request" | "issue" | "issue_comment" | "commit";
+  url: string;
+  number?: number;
+  title?: string;
+}
+
+export const MAX_ARTIFACTS_PER_TASK = 20;
+
 export interface TaskRecord {
   task_id: string;
   status: TaskStatus;
@@ -46,6 +55,7 @@ export interface TaskRecord {
   finished_at?: string;
   error?: string;
   progress?: string;
+  artifacts?: TaskArtifact[];
 }
 
 export interface ClaimedTask {
@@ -115,6 +125,36 @@ function taskProgressKey(installationId: string, taskId: string): string {
 
 function taskMessagesKey(installationId: string, taskId: string): string {
   return `task:${installationId}:${taskId}:messages`;
+}
+
+function taskArtifactsKey(installationId: string, taskId: string): string {
+  return `task:${installationId}:${taskId}:artifacts`;
+}
+
+function parseTaskArtifacts(raw: unknown[]): TaskArtifact[] {
+  const artifacts: TaskArtifact[] = [];
+  for (const entry of raw) {
+    try {
+      const str = typeof entry === "string" ? entry : JSON.stringify(entry);
+      const parsed = JSON.parse(str) as Record<string, unknown>;
+      if (
+        typeof parsed.type === "string"
+        && ["pull_request", "issue", "issue_comment", "commit"].includes(parsed.type)
+        && typeof parsed.url === "string"
+      ) {
+        const artifact: TaskArtifact = {
+          type: parsed.type as TaskArtifact["type"],
+          url: parsed.url,
+        };
+        if (typeof parsed.number === "number") artifact.number = parsed.number;
+        if (typeof parsed.title === "string") artifact.title = parsed.title;
+        artifacts.push(artifact);
+      }
+    } catch {
+      // Drop malformed entries silently.
+    }
+  }
+  return artifacts;
 }
 
 function taskClaimTokenHashKey(installationId: string, taskId: string): string {
@@ -302,6 +342,7 @@ async function cleanupMissingTask(
     .zrem(recentKey(installationId), taskId)
     .del(taskProgressKey(installationId, taskId))
     .del(taskMessagesKey(installationId, taskId))
+    .del(taskArtifactsKey(installationId, taskId))
     .del(taskClaimTokenHashKey(installationId, taskId))
     .exec();
 }
@@ -329,13 +370,19 @@ async function buildTaskRecord(
   stored: StoredTaskRecord,
   redis: Redis,
 ): Promise<TaskRecord> {
-  const progressRaw = await redis.get(taskProgressKey(installationId, stored.task_id));
+  const [progressRaw, artifactsRaw] = await Promise.all([
+    redis.get(taskProgressKey(installationId, stored.task_id)),
+    redis.lrange(taskArtifactsKey(installationId, stored.task_id), 0, -1),
+  ]);
 
   const task: TaskRecord = {
     ...stored,
   };
 
   if (typeof progressRaw === "string") task.progress = progressRaw;
+
+  const artifacts = parseTaskArtifacts(artifactsRaw ?? []);
+  if (artifacts.length > 0) task.artifacts = artifacts;
 
   return task;
 }
@@ -621,12 +668,15 @@ async function finalizeTask(
         .zadd(recentKey(installationId), { score: Date.now(), member: taskId })
         .exec();
 
-      // Best-effort: expire the messages list alongside the task data.
+      // Best-effort: expire the messages and artifacts lists alongside the task data.
       // The task has already been finalized so a failure here must not propagate.
       try {
-        await redis.expire(taskMessagesKey(installationId, taskId), ttl);
+        await Promise.all([
+          redis.expire(taskMessagesKey(installationId, taskId), ttl),
+          redis.expire(taskArtifactsKey(installationId, taskId), ttl),
+        ]);
       } catch (error) {
-        console.error("[tasks] Failed to expire messages key (task finalized)", {
+        console.error("[tasks] Failed to expire messages/artifacts keys (task finalized)", {
           installationId,
           taskId,
           error,
@@ -1017,6 +1067,7 @@ export async function deleteTask(
       .del(taskKey(installationId, taskId))
       .del(taskProgressKey(installationId, taskId))
       .del(taskMessagesKey(installationId, taskId))
+      .del(taskArtifactsKey(installationId, taskId))
       .zrem(pendingKey(installationId), taskId)
       .zrem(runningKey(installationId), taskId)
       .zrem(recentKey(installationId), taskId)
@@ -1095,6 +1146,49 @@ export async function retryTask(
         taskId,
       });
       return { ok: false, reason: "concurrency_limited" };
+    }
+    throw error;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task artifacts
+// ---------------------------------------------------------------------------
+
+export type AppendTaskArtifactsResult =
+  | { ok: true; artifacts: TaskArtifact[] }
+  | { ok: false; reason: "not_found" | "limit_exceeded" | "lock_timeout" };
+
+export async function appendTaskArtifacts(
+  installationId: string,
+  taskId: string,
+  newArtifacts: TaskArtifact[],
+  redis: Redis,
+): Promise<AppendTaskArtifactsResult> {
+  try {
+    return await withTaskInstallationLock(installationId, redis, async () => {
+      const stored = await loadStoredTask(installationId, taskId, redis);
+      if (!stored) return { ok: false, reason: "not_found" };
+
+      const key = taskArtifactsKey(installationId, taskId);
+      const currentCount = await redis.llen(key);
+
+      if (currentCount + newArtifacts.length > MAX_ARTIFACTS_PER_TASK) {
+        return { ok: false, reason: "limit_exceeded" };
+      }
+
+      for (const artifact of newArtifacts) {
+        await redis.rpush(key, JSON.stringify(artifact));
+      }
+
+      const allRaw = await redis.lrange(key, 0, -1);
+      const artifacts = parseTaskArtifacts(allRaw ?? []);
+      return { ok: true, artifacts };
+    });
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      console.warn("[tasks] Task artifacts lock timeout", { installationId, taskId });
+      return { ok: false, reason: "lock_timeout" };
     }
     throw error;
   }

@@ -11,7 +11,7 @@ import {
   taskComposerGuidance,
   taskComposerPlaceholder,
 } from "../task-helpers";
-import { type TaskMessage, type TaskRecord } from "../types";
+import { type TaskArtifact, type TaskMessage, type TaskRecord } from "../types";
 
 // ---------------------------------------------------------------------------
 // Icons
@@ -189,6 +189,51 @@ function RepoIcon({ className }: { className?: string }) {
     >
       <path d="M4 2v12M4 4h6a2 2 0 0 1 2 2v1a2 2 0 0 1-2 2H4" />
     </svg>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Artifact badges
+// ---------------------------------------------------------------------------
+
+const ARTIFACT_TYPE_LABEL: Record<TaskArtifact["type"], string> = {
+  pull_request: "PR",
+  issue: "Issue",
+  issue_comment: "Comment",
+  commit: "Commit",
+};
+
+function ArtifactBadges({ artifacts }: { artifacts: TaskArtifact[] }) {
+  if (artifacts.length === 0) return null;
+  return (
+    <div className="mt-4 flex flex-wrap gap-2">
+      {artifacts.map((artifact, i) => {
+        const label = artifact.title
+          ? artifact.title
+          : artifact.number !== undefined
+            ? `${ARTIFACT_TYPE_LABEL[artifact.type]} #${artifact.number}`
+            : ARTIFACT_TYPE_LABEL[artifact.type];
+
+        return (
+          <a
+            key={`${artifact.url}-${i}`}
+            href={artifact.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1.5 rounded-md border border-honey-500/20 bg-honey-500/5 px-2.5 py-1 text-xs text-honey-400 transition-colors hover:border-honey-500/40 hover:text-honey-300"
+            title={artifact.url}
+          >
+            <span className="font-medium">{ARTIFACT_TYPE_LABEL[artifact.type]}</span>
+            {artifact.number !== undefined && !artifact.title && (
+              <span>#{artifact.number}</span>
+            )}
+            {artifact.title && (
+              <span className="max-w-[180px] truncate">{artifact.title}</span>
+            )}
+          </a>
+        );
+      })}
+    </div>
   );
 }
 
@@ -706,6 +751,11 @@ export default function TaskDetail({ taskId }: { taskId: string }) {
           <div className="mt-4 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2.5">
             <p className="text-sm text-red-400">{task.error}</p>
           </div>
+        )}
+
+        {/* Artifact links */}
+        {task.artifacts && task.artifacts.length > 0 && (
+          <ArtifactBadges artifacts={task.artifacts} />
         )}
       </div>
 
