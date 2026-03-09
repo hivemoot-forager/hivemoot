@@ -135,8 +135,8 @@ function parseTaskArtifacts(raw: unknown[]): TaskArtifact[] {
   const artifacts: TaskArtifact[] = [];
   for (const entry of raw) {
     try {
-      const str = typeof entry === "string" ? entry : JSON.stringify(entry);
-      const parsed = JSON.parse(str) as Record<string, unknown>;
+      if (typeof entry !== "string") continue;
+      const parsed = JSON.parse(entry) as Record<string, unknown>;
       if (
         typeof parsed.type === "string"
         && ["pull_request", "issue", "issue_comment", "commit"].includes(parsed.type)
