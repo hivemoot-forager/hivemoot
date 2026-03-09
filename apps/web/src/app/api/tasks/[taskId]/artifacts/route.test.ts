@@ -14,7 +14,7 @@ vi.mock("@/server/task-store", () => ({
 }));
 
 import { authenticateTaskExecutorRequest } from "@/server/task-executor-auth";
-import { getTask, verifyTaskClaimToken, appendTaskArtifacts } from "@/server/task-store";
+import { type TaskArtifact, getTask, verifyTaskClaimToken, appendTaskArtifacts } from "@/server/task-store";
 import { POST } from "./route";
 
 const TASK_ID = "abc123abc123abc123abc123";
@@ -29,7 +29,7 @@ const BASE_TASK = {
   updated_at: "2026-03-09T12:01:00.000Z",
 };
 
-const VALID_ARTIFACT = {
+const VALID_ARTIFACT: TaskArtifact = {
   type: "pull_request",
   url: "https://github.com/hivemoot/hivemoot/pull/42",
   number: 42,
