@@ -43,7 +43,7 @@ export interface TaskArtifact {
 }
 
 export type AppendArtifactsResult =
-  | { ok: true; task: TaskRecord }
+  | { ok: true; artifacts: TaskArtifact[] }
   | { ok: false; reason: "not_found" | "cap_exceeded" };
 
 const MAX_ARTIFACTS_PER_TASK = 20;
@@ -1493,7 +1493,6 @@ export async function appendTaskArtifacts(
     const merged = [...existing, ...newArtifacts];
     await redis.set(taskArtifactsKey(installationId, taskId), JSON.stringify(merged));
 
-    const task = await buildTaskRecord(installationId, stored, redis);
-    return { ok: true, task: { ...task, artifacts: merged } };
+    return { ok: true, artifacts: merged };
   });
 }

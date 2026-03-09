@@ -193,5 +193,5 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  return NextResponse.json({ task: appendResult.task });
+  return NextResponse.json({ artifacts: appendResult.artifacts });
 }

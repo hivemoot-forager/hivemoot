@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type Redis } from "@upstash/redis";
 import {
   addUserMessage,
+  appendTaskArtifacts,
   appendTaskMessage,
   checkTaskCreateRateLimit,
   claimNextPendingTask,
@@ -1953,5 +1954,131 @@ describe("addUserMessage", () => {
     const userMsg = messages[messages.length - 2];
     expect(userMsg.role).toBe("user");
     expect(userMsg.content).toBe("Do more");
+  });
+});
+
+describe("appendTaskArtifacts", () => {
+  let redis: ReturnType<typeof makeMockRedis>;
+
+  beforeEach(() => {
+    redis = makeMockRedis();
+  });
+
+  async function createRunningTask() {
+    const created = await createTask(
+      "inst-1",
+      "queen",
+      { prompt: "Do a thing", repos: ["hivemoot/hivemoot"], timeout_secs: 300 },
+      redis,
+    );
+    expect(created.ok).toBe(true);
+    if (!created.ok) throw new Error("create failed");
+    const claimed = await claimNextPendingTask("inst-1", redis);
+    expect(claimed).not.toBeNull();
+    return created.task.task_id;
+  }
+
+  it("appends an artifact and surfaces it in getTask", async () => {
+    const taskId = await createRunningTask();
+    const result = await appendTaskArtifacts(
+      "inst-1",
+      taskId,
+      [{ type: "pull_request", url: "https://github.com/hivemoot/hivemoot/pull/1", number: 1, title: "My PR" }],
+      redis,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.artifacts).toHaveLength(1);
+    expect(result.artifacts[0].type).toBe("pull_request");
+    expect(result.artifacts[0].number).toBe(1);
+    expect(result.artifacts[0].title).toBe("My PR");
+
+    const task = await getTask("inst-1", taskId, redis);
+    expect(task?.artifacts).toHaveLength(1);
+    expect(task?.artifacts?.[0].url).toBe("https://github.com/hivemoot/hivemoot/pull/1");
+  });
+
+  it("accumulates artifacts across multiple appends", async () => {
+    const taskId = await createRunningTask();
+
+    await appendTaskArtifacts(
+      "inst-1",
+      taskId,
+      [{ type: "pull_request", url: "https://github.com/hivemoot/hivemoot/pull/1", number: 1 }],
+      redis,
+    );
+    const second = await appendTaskArtifacts(
+      "inst-1",
+      taskId,
+      [{ type: "issue", url: "https://github.com/hivemoot/hivemoot/issues/5", number: 5 }],
+      redis,
+    );
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.artifacts).toHaveLength(2);
+
+    const task = await getTask("inst-1", taskId, redis);
+    expect(task?.artifacts).toHaveLength(2);
+  });
+
+  it("returns not_found for a nonexistent task", async () => {
+    const result = await appendTaskArtifacts(
+      "inst-1",
+      "nonexistent-task-id",
+      [{ type: "issue", url: "https://github.com/hivemoot/hivemoot/issues/1" }],
+      redis,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.reason).toBe("not_found");
+  });
+
+  it("enforces the 20-artifact cap", async () => {
+    const taskId = await createRunningTask();
+
+    // Fill up to exactly 20.
+    const batch = Array.from({ length: 20 }, (_, i) => ({
+      type: "issue" as const,
+      url: `https://github.com/hivemoot/hivemoot/issues/${i + 1}`,
+      number: i + 1,
+    }));
+    const fill = await appendTaskArtifacts("inst-1", taskId, batch, redis);
+    expect(fill.ok).toBe(true);
+
+    // A 21st artifact must be rejected.
+    const over = await appendTaskArtifacts(
+      "inst-1",
+      taskId,
+      [{ type: "issue", url: "https://github.com/hivemoot/hivemoot/issues/21", number: 21 }],
+      redis,
+    );
+    expect(over.ok).toBe(false);
+    if (!over.ok) expect(over.reason).toBe("cap_exceeded");
+  });
+
+  it("concurrent appends preserve both entries (regression: no lost updates under lock)", async () => {
+    const taskId = await createRunningTask();
+
+    // Fire two appends simultaneously. Without the installation lock, the second
+    // redis.set would overwrite the first, dropping one artifact.
+    const [r1, r2] = await Promise.all([
+      appendTaskArtifacts(
+        "inst-1",
+        taskId,
+        [{ type: "pull_request", url: "https://github.com/hivemoot/hivemoot/pull/10", number: 10 }],
+        redis,
+      ),
+      appendTaskArtifacts(
+        "inst-1",
+        taskId,
+        [{ type: "issue", url: "https://github.com/hivemoot/hivemoot/issues/20", number: 20 }],
+        redis,
+      ),
+    ]);
+
+    expect(r1.ok).toBe(true);
+    expect(r2.ok).toBe(true);
+
+    const task = await getTask("inst-1", taskId, redis);
+    expect(task?.artifacts).toHaveLength(2);
   });
 });
