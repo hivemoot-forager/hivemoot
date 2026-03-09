@@ -33,6 +33,21 @@ export interface TaskMessage {
 const MAX_MESSAGE_CONTENT_CHARS = 128_000;
 const MAX_MESSAGES_PER_TASK = 200;
 
+export type ArtifactType = "pull_request" | "issue" | "issue_comment" | "commit";
+
+export interface TaskArtifact {
+  type: ArtifactType;
+  url: string;
+  number?: number;
+  title?: string;
+}
+
+export type AppendArtifactsResult =
+  | { ok: true; task: TaskRecord }
+  | { ok: false; reason: "not_found" | "cap_exceeded" };
+
+const MAX_ARTIFACTS_PER_TASK = 20;
+
 export interface TaskRecord {
   task_id: string;
   status: TaskStatus;
@@ -46,6 +61,7 @@ export interface TaskRecord {
   finished_at?: string;
   error?: string;
   progress?: string;
+  artifacts?: TaskArtifact[];
 }
 
 export interface ClaimedTask {
@@ -119,6 +135,10 @@ function taskMessagesKey(installationId: string, taskId: string): string {
 
 function taskClaimTokenHashKey(installationId: string, taskId: string): string {
   return `task:${installationId}:${taskId}:claim-token-hash`;
+}
+
+function taskArtifactsKey(installationId: string, taskId: string): string {
+  return `task:${installationId}:${taskId}:artifacts`;
 }
 
 function pendingKey(installationId: string): string {
@@ -303,6 +323,7 @@ async function cleanupMissingTask(
     .del(taskProgressKey(installationId, taskId))
     .del(taskMessagesKey(installationId, taskId))
     .del(taskClaimTokenHashKey(installationId, taskId))
+    .del(taskArtifactsKey(installationId, taskId))
     .exec();
 }
 
@@ -329,13 +350,27 @@ async function buildTaskRecord(
   stored: StoredTaskRecord,
   redis: Redis,
 ): Promise<TaskRecord> {
-  const progressRaw = await redis.get(taskProgressKey(installationId, stored.task_id));
+  const [progressRaw, artifactsRaw] = await Promise.all([
+    redis.get(taskProgressKey(installationId, stored.task_id)),
+    redis.get(taskArtifactsKey(installationId, stored.task_id)),
+  ]);
 
   const task: TaskRecord = {
     ...stored,
   };
 
   if (typeof progressRaw === "string") task.progress = progressRaw;
+
+  if (typeof artifactsRaw === "string") {
+    try {
+      const parsed = JSON.parse(artifactsRaw);
+      if (Array.isArray(parsed)) task.artifacts = parsed as TaskArtifact[];
+    } catch {
+      // ignore malformed artifacts
+    }
+  } else if (Array.isArray(artifactsRaw)) {
+    task.artifacts = artifactsRaw as TaskArtifact[];
+  }
 
   return task;
 }
@@ -1017,6 +1052,7 @@ export async function deleteTask(
       .del(taskKey(installationId, taskId))
       .del(taskProgressKey(installationId, taskId))
       .del(taskMessagesKey(installationId, taskId))
+      .del(taskArtifactsKey(installationId, taskId))
       .zrem(pendingKey(installationId), taskId)
       .zrem(runningKey(installationId), taskId)
       .zrem(recentKey(installationId), taskId)
@@ -1062,6 +1098,7 @@ export async function retryTask(
         .zadd(pendingKey(installationId), { score: Date.now(), member: taskId })
         .zadd(recentKey(installationId), { score: Date.now(), member: taskId })
         .del(taskClaimTokenHashKey(installationId, taskId))
+        .del(taskArtifactsKey(installationId, taskId))
         .exec();
 
       try {
@@ -1420,4 +1457,43 @@ export async function addUserMessage(
     }
     throw error;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Task artifacts
+// ---------------------------------------------------------------------------
+
+export async function appendTaskArtifacts(
+  installationId: string,
+  taskId: string,
+  newArtifacts: TaskArtifact[],
+  redis: Redis,
+): Promise<AppendArtifactsResult> {
+  return withTaskInstallationLock(installationId, redis, async () => {
+    const stored = await loadStoredTask(installationId, taskId, redis);
+    if (!stored) return { ok: false, reason: "not_found" };
+
+    const artifactsRaw = await redis.get(taskArtifactsKey(installationId, taskId));
+    let existing: TaskArtifact[] = [];
+    if (typeof artifactsRaw === "string") {
+      try {
+        const parsed = JSON.parse(artifactsRaw);
+        if (Array.isArray(parsed)) existing = parsed as TaskArtifact[];
+      } catch {
+        // ignore malformed artifacts
+      }
+    } else if (Array.isArray(artifactsRaw)) {
+      existing = artifactsRaw as TaskArtifact[];
+    }
+
+    if (existing.length + newArtifacts.length > MAX_ARTIFACTS_PER_TASK) {
+      return { ok: false, reason: "cap_exceeded" };
+    }
+
+    const merged = [...existing, ...newArtifacts];
+    await redis.set(taskArtifactsKey(installationId, taskId), JSON.stringify(merged));
+
+    const task = await buildTaskRecord(installationId, stored, redis);
+    return { ok: true, task: { ...task, artifacts: merged } };
+  });
 }

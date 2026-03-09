@@ -1,5 +1,15 @@
 // Shared client-side task models used by the dashboard task views.
 // Keep these aligned with the task store payload shape.
+
+export type ArtifactType = "pull_request" | "issue" | "issue_comment" | "commit";
+
+export interface TaskArtifact {
+  type: ArtifactType;
+  url: string;
+  number?: number;
+  title?: string;
+}
+
 export interface TaskRecord {
   task_id: string;
   status: string;
@@ -13,6 +23,7 @@ export interface TaskRecord {
   finished_at?: string;
   error?: string;
   progress?: string;
+  artifacts?: TaskArtifact[];
 }
 
 export interface TaskMessage {

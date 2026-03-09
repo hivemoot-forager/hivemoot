@@ -11,7 +11,7 @@ import {
   taskComposerGuidance,
   taskComposerPlaceholder,
 } from "../task-helpers";
-import { type TaskMessage, type TaskRecord } from "../types";
+import { type TaskArtifact, type TaskMessage, type TaskRecord } from "../types";
 
 // ---------------------------------------------------------------------------
 // Icons
@@ -366,6 +366,48 @@ function MarkdownContent({ children, className }: { children: string; className?
 }
 
 // ---------------------------------------------------------------------------
+// Artifact badges
+// ---------------------------------------------------------------------------
+
+function artifactLabel(artifact: TaskArtifact): string {
+  switch (artifact.type) {
+    case "pull_request":
+      return artifact.number != null ? `PR #${artifact.number}` : "PR";
+    case "issue":
+      return artifact.number != null ? `#${artifact.number}` : "Issue";
+    case "issue_comment":
+      return "Comment";
+    case "commit": {
+      // Try to extract a 7-char SHA from the URL (last path segment).
+      const sha = artifact.url.split("/").pop();
+      return sha && /^[0-9a-f]{7,}$/i.test(sha) ? `Commit ${sha.slice(0, 7)}` : "Commit";
+    }
+    default:
+      return "Link";
+  }
+}
+
+function ArtifactBadges({ artifacts }: { artifacts: TaskArtifact[] }) {
+  if (!artifacts || artifacts.length === 0) return null;
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+      {artifacts.map((artifact, i) => (
+        <a
+          key={i}
+          href={artifact.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={artifact.title ?? artifact.url}
+          className="inline-flex items-center rounded-md bg-white/[0.05] px-2 py-0.5 text-xs text-zinc-400 transition-colors hover:bg-white/[0.09] hover:text-zinc-200"
+        >
+          {artifactLabel(artifact)}
+        </a>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -695,6 +737,11 @@ export default function TaskDetail({ taskId }: { taskId: string }) {
           <ClockIcon className="h-3 w-3 text-zinc-600" />
           <span>Timeout {formatDuration(task.timeout_secs)}</span>
         </div>
+
+        {/* Artifact badges */}
+        {task.artifacts && task.artifacts.length > 0 && (
+          <ArtifactBadges artifacts={task.artifacts} />
+        )}
 
         {/* Progress (running tasks) */}
         {task.progress && !isTerminal(task.status) && task.status !== "needs_follow_up" && (
