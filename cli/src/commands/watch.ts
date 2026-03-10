@@ -7,8 +7,10 @@ import {
   fetchCommentBody,
   fetchRecentSubjectComments,
   fetchSubjectBodyResult,
+  fetchReviewRequestState,
   buildMentionEvent,
   isAgentMentioned,
+  parseSubjectNumber,
 } from "../github/notifications.js";
 import { loadState, saveState, mergeAckJournal, addProcessedId, buildLatestProcessedByThread } from "../watch/state.js";
 
@@ -272,7 +274,45 @@ async function runPollLoop(
           }
         }
 
-        const event = buildMentionEvent(notification, eventSource, agent);
+        // -- Review-request verification (strict for reason="review_requested") --
+        // Uses GET /pulls/{n}/requested_reviewers — a state endpoint that GitHub
+        // maintains precisely: a reviewer is removed the moment they submit a review.
+        // This prevents stale thread updates (comments, new commits on a reviewed PR)
+        // from re-triggering the agent on a request that has already been fulfilled.
+        let reviewExtras: { trigger: string } | undefined;
+        if (notification.reason === "review_requested") {
+          if (notification.subject.type !== "PullRequest") {
+            // review_requested only applies to PRs; mark processed and move on
+            log(`Skipping ${notification.id}: review_requested on non-PR subject, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+          const pullNumber = parseSubjectNumber(notification.subject.url);
+          if (pullNumber === undefined) {
+            log(`Skipping ${notification.id}: cannot parse PR number from subject URL, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+          const [repoOwner, repoName] = repo.split("/");
+          const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
+          if (!reviewState.pending) {
+            if (reviewState.permanentFailure) {
+              log(`Skipping ${notification.id}: requested_reviewers fetch failed permanently, marking processed`);
+            } else {
+              log(`Skipping ${notification.id}: agent not in requested_reviewers (review submitted or request withdrawn), marking processed`);
+            }
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+          reviewExtras = { trigger: "review_requested" };
+        }
+
+        const event = reviewExtras
+          ? buildMentionEvent(notification, eventSource, agent, reviewExtras)
+          : buildMentionEvent(notification, eventSource, agent);
         if (!event) {
           // Can't parse — skip silently. Unparseable events reappear next poll
           // but are harmless since all=false naturally drops them once the

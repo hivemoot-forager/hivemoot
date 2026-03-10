@@ -372,6 +372,43 @@ export async function fetchSubjectBodyResult(subjectUrl: string): Promise<FetchD
   }
 }
 
+export interface ReviewRequestState {
+  /** Is the agent currently in the PR's requested_reviewers list? */
+  pending: boolean;
+  /** GitHub login of who requested the review, when identifiable. */
+  requestedBy?: string;
+  /** True when the GitHub API returned a permanent error (403/404). */
+  permanentFailure: boolean;
+}
+
+/**
+ * Check whether `agent` has a pending review request on a PR.
+ * Uses GET /pulls/{pull_number}/requested_reviewers — a direct state query
+ * that GitHub maintains: reviewers are removed once they submit a review.
+ *
+ * `requestedBy` is not directly available from this endpoint; callers that
+ * need the requester identity should fetch the PR timeline separately.
+ */
+export async function fetchReviewRequestState(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  agent: string,
+): Promise<ReviewRequestState> {
+  try {
+    const raw = await gh([
+      "api",
+      `/repos/${owner}/${repo}/pulls/${pullNumber}/requested_reviewers`,
+      "--jq", ".users | map(.login) | join(\",\")",
+    ]);
+    const logins = raw.trim() ? raw.trim().split(",") : [];
+    const pending = logins.some((l) => l.toLowerCase() === agent.toLowerCase());
+    return { pending, permanentFailure: false };
+  } catch (err) {
+    return { pending: false, permanentFailure: isPermanentFetchError(err) };
+  }
+}
+
 /**
  * Check if the comment body contains an @mention of the given GitHub login.
  * Case-insensitive, boundary-safe on both sides:
@@ -391,11 +428,12 @@ export function buildMentionEvent(
   notification: RawNotification,
   comment: CommentDetail | null,
   agent: string,
+  extras?: { trigger?: string; requester?: string },
 ): MentionEvent | null {
   const number = parseSubjectNumber(notification.subject.url);
   if (number === undefined) return null;
 
-  return {
+  const event: MentionEvent = {
     agent,
     repo: notification.repository.full_name,
     number,
@@ -407,4 +445,7 @@ export function buildMentionEvent(
     threadId: notification.id,
     timestamp: notification.updated_at,
   };
+  if (extras?.trigger !== undefined) event.trigger = extras.trigger;
+  if (extras?.requester !== undefined) event.requester = extras.requester;
+  return event;
 }

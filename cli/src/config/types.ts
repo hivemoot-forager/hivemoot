@@ -248,6 +248,8 @@ export interface MentionEvent {
   url: string;        // HTML URL of the comment
   threadId: string;   // notification thread ID
   timestamp: string;  // ISO 8601
+  trigger?: string;   // notification reason, e.g. "mention" | "review_requested"
+  requester?: string; // for review_requested: login of who requested the review
 }
 
 // ── Error Types ────────────────────────────────────────────────────

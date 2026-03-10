@@ -13,8 +13,10 @@ vi.mock("../github/notifications.js", () => ({
   fetchCommentBody: vi.fn(),
   fetchRecentSubjectComments: vi.fn(),
   fetchSubjectBodyResult: vi.fn(),
+  fetchReviewRequestState: vi.fn(),
   buildMentionEvent: vi.fn(),
   isAgentMentioned: vi.fn(),
+  parseSubjectNumber: vi.fn(),
 }));
 
 vi.mock("../watch/state.js", async (importOriginal) => {
@@ -34,8 +36,10 @@ import {
   fetchCommentBody,
   fetchRecentSubjectComments,
   fetchSubjectBodyResult,
+  fetchReviewRequestState,
   buildMentionEvent,
   isAgentMentioned,
+  parseSubjectNumber,
 } from "../github/notifications.js";
 import { loadState, saveState, mergeAckJournal } from "../watch/state.js";
 
@@ -44,6 +48,8 @@ const mockedFetchMentions = vi.mocked(fetchMentionNotifications);
 const mockedFetchComment = vi.mocked(fetchCommentBody);
 const mockedFetchRecentComments = vi.mocked(fetchRecentSubjectComments);
 const mockedFetchSubjectResult = vi.mocked(fetchSubjectBodyResult);
+const mockedFetchReviewRequestState = vi.mocked(fetchReviewRequestState);
+const mockedParseSubjectNumber = vi.mocked(parseSubjectNumber);
 const mockedBuildEvent = vi.mocked(buildMentionEvent);
 const mockedIsAgentMentioned = vi.mocked(isAgentMentioned);
 const mockedLoadState = vi.mocked(loadState);
@@ -106,6 +112,11 @@ beforeEach(() => {
   mockedLoadState.mockResolvedValue(defaultState());
   mockedSaveState.mockResolvedValue(undefined);
   mockedFetchMentions.mockResolvedValue([]);
+  mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false });
+  mockedParseSubjectNumber.mockImplementation((url: string) => {
+    const match = url.match(/\/(\d+)$/);
+    return match ? Number(match[1]) : undefined;
+  });
   mockedIsAgentMentioned.mockReturnValue(true);
   mockedFetchRecentComments.mockResolvedValue({
     comments: [],
@@ -628,6 +639,115 @@ describe("watchCommand (--once mode)", () => {
       expect.any(String),
       expect.objectContaining({
         processedThreadIds: ["1001:2026-02-01T11:30:00.000Z"],
+      }),
+    );
+  });
+});
+
+describe("watchCommand (review_requested reason)", () => {
+  function makePrNotification(overrides: Partial<RawNotification> = {}): RawNotification {
+    return {
+      id: "2001",
+      unread: true,
+      reason: "review_requested",
+      updated_at: "2026-03-10T10:00:00.000Z",
+      subject: {
+        url: "https://api.github.com/repos/owner/repo/pulls/99",
+        type: "PullRequest",
+        title: "Add feature X",
+        latest_comment_url: null,
+      },
+      repository: { full_name: "owner/repo" },
+      ...overrides,
+    };
+  }
+
+  it("emits event when agent is in requested_reviewers and includes trigger=review_requested", async () => {
+    const notification = makePrNotification();
+    const event: MentionEvent = {
+      agent: "test-agent",
+      repo: "owner/repo",
+      number: 99,
+      type: "PullRequest",
+      title: "Add feature X",
+      author: "unknown",
+      body: "",
+      url: "",
+      threadId: "2001",
+      timestamp: "2026-03-10T10:00:00.000Z",
+      trigger: "review_requested",
+    };
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false });
+    mockedBuildEvent.mockReturnValue(event);
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedFetchReviewRequestState).toHaveBeenCalledWith("owner", "repo", 99, "test-agent");
+    expect(mockedBuildEvent).toHaveBeenCalledWith(notification, null, "test-agent", { trigger: "review_requested" });
+    expect(stdoutSpy).toHaveBeenCalledWith(JSON.stringify(event) + "\n");
+  });
+
+  it("skips notification and marks processed when agent is not in requested_reviewers", async () => {
+    const notification = makePrNotification();
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: false });
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedFetchReviewRequestState).toHaveBeenCalledWith("owner", "repo", 99, "test-agent");
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    const eventWrites = (stdoutSpy.mock.calls as [string][])
+      .map(([s]) => s)
+      .filter((s) => s.includes('"agent"'));
+    expect(eventWrites).toHaveLength(0);
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        processedThreadIds: ["2001:2026-03-10T10:00:00.000Z"],
+      }),
+    );
+  });
+
+  it("skips and marks processed when requested_reviewers fetch fails permanently", async () => {
+    const notification = makePrNotification();
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: true });
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        processedThreadIds: ["2001:2026-03-10T10:00:00.000Z"],
+      }),
+    );
+  });
+
+  it("skips non-PullRequest review_requested notification and marks processed", async () => {
+    const notification = makePrNotification({
+      subject: {
+        url: "https://api.github.com/repos/owner/repo/issues/10",
+        type: "Issue",
+        title: "Some issue",
+        latest_comment_url: null,
+      },
+    });
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedFetchReviewRequestState).not.toHaveBeenCalled();
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        processedThreadIds: ["2001:2026-03-10T10:00:00.000Z"],
       }),
     );
   });

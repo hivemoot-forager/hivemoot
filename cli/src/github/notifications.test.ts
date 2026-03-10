@@ -13,6 +13,7 @@ import {
   fetchRecentSubjectComments,
   fetchSubjectBody,
   fetchSubjectBodyResult,
+  fetchReviewRequestState,
   buildMentionEvent,
   parseSubjectNumber,
   isAgentMentioned,
@@ -627,6 +628,25 @@ describe("buildMentionEvent()", () => {
     expect(event!.type).toBe("PullRequest");
     expect(event!.number).toBe(99);
   });
+
+  it("includes trigger and requester from extras when provided", () => {
+    const event = buildMentionEvent(
+      baseNotification,
+      baseComment,
+      "hivemoot-worker",
+      { trigger: "review_requested", requester: "project-lead" },
+    );
+
+    expect(event!.trigger).toBe("review_requested");
+    expect(event!.requester).toBe("project-lead");
+  });
+
+  it("omits trigger and requester when extras is not provided", () => {
+    const event = buildMentionEvent(baseNotification, baseComment, "hivemoot-worker");
+
+    expect(event).not.toHaveProperty("trigger");
+    expect(event).not.toHaveProperty("requester");
+  });
 });
 
 describe("isAgentMentioned()", () => {
@@ -664,5 +684,58 @@ describe("isAgentMentioned()", () => {
 
   it("returns false for empty body", () => {
     expect(isAgentMentioned("", "hivemoot-worker")).toBe(false);
+  });
+});
+
+describe("fetchReviewRequestState", () => {
+  it("returns pending=true when agent is in requested_reviewers", async () => {
+    mockedGh.mockResolvedValue("hivemoot-forager,hivemoot-worker");
+
+    const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
+
+    expect(result).toEqual({ pending: true, permanentFailure: false });
+    expect(mockedGh).toHaveBeenCalledWith(expect.arrayContaining([
+      "/repos/owner/repo/pulls/42/requested_reviewers",
+    ]));
+  });
+
+  it("returns pending=false when agent is not in requested_reviewers", async () => {
+    mockedGh.mockResolvedValue("hivemoot-worker,hivemoot-scout");
+
+    const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
+
+    expect(result).toEqual({ pending: false, permanentFailure: false });
+  });
+
+  it("returns pending=false with empty list when no reviewers are requested", async () => {
+    mockedGh.mockResolvedValue("");
+
+    const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
+
+    expect(result).toEqual({ pending: false, permanentFailure: false });
+  });
+
+  it("is case-insensitive for agent login comparison", async () => {
+    mockedGh.mockResolvedValue("HiveMoot-Forager");
+
+    const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
+
+    expect(result).toEqual({ pending: true, permanentFailure: false });
+  });
+
+  it("returns permanentFailure=true on 403/404 errors", async () => {
+    mockedGh.mockRejectedValue(new CliError("HTTP 404", "GH_NOT_FOUND", 1));
+
+    const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
+
+    expect(result).toEqual({ pending: false, permanentFailure: true });
+  });
+
+  it("returns permanentFailure=false on transient errors", async () => {
+    mockedGh.mockRejectedValue(new Error("network error"));
+
+    const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
+
+    expect(result).toEqual({ pending: false, permanentFailure: false });
   });
 });
