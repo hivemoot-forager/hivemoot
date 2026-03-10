@@ -158,10 +158,13 @@ async function runPollLoop(
     state = await mergeAckJournal(stateFile, state);
     const latestProcessedByThread = buildLatestProcessedByThread(state.processedThreadIds);
 
-    // Effective sleep duration: max(configured interval, X-Poll-Interval from GitHub)
+    // Load per-repo poll state for conditional request headers
     const repoPollState: NotificationsPollState | undefined = state.notificationsPollState?.[repo];
-    const githubPollMs = repoPollState?.pollInterval ? repoPollState.pollInterval * 1000 : 0;
-    const effectiveSleepMs = Math.max(intervalMs, githubPollMs);
+
+    // Default sleep to the persisted interval (used on error/retry path and as fallback).
+    // Overwritten below when a 200 response arrives with a new X-Poll-Interval.
+    const persistedPollMs = repoPollState?.pollInterval ? repoPollState.pollInterval * 1000 : 0;
+    let effectiveSleepMs = Math.max(intervalMs, persistedPollMs);
 
     try {
       // Capture time before fetch (informational — no longer used as fetch cursor)
@@ -178,6 +181,7 @@ async function runPollLoop(
         await saveState(stateFile, state);
 
         if (once) break;
+        // 304: no new X-Poll-Interval from server — effectiveSleepMs already holds persisted interval
         await sleep(effectiveSleepMs, signal);
         continue;
       }
@@ -194,6 +198,11 @@ async function runPollLoop(
           [repo]: newRepoPollState,
         },
       };
+
+      // 200: recompute sleep from the current response's X-Poll-Interval so the new
+      // minimum takes effect immediately (not one cycle late).
+      const newPollMs = newRepoPollState.pollInterval ? newRepoPollState.pollInterval * 1000 : 0;
+      effectiveSleepMs = Math.max(intervalMs, newPollMs);
 
       const notifications = conditionalResult.notifications;
 

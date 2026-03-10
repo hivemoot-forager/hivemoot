@@ -713,3 +713,44 @@ describe("watchCommand (--once mode)", () => {
     );
   });
 });
+
+describe("watchCommand (continuous mode)", () => {
+  it("uses X-Poll-Interval from 200 response for sleep immediately, not stale persisted value", async () => {
+    vi.useFakeTimers();
+
+    // Old persisted interval: 60s. Configured interval: 30s.
+    // Server returns new X-Poll-Interval: 120s on first poll.
+    // Correct behaviour: first sleep is 120s, not 60s (the stale persisted value).
+    mockedLoadState.mockResolvedValue(defaultState({
+      notificationsPollState: { "owner/repo": { pollInterval: 60 } },
+    }));
+
+    let pollCount = 0;
+    mockedFetchMentions.mockImplementation(async () => {
+      pollCount++;
+      return makeConditionalResult([], { pollInterval: 120 });
+    });
+
+    // Start continuous watch (configured interval: 30s)
+    const watchPromise = watchCommand({ repo: "owner/repo", interval: 30 });
+
+    // Flush microtasks: first poll runs, sleep(120_000) timer is registered
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pollCount).toBe(1);
+
+    // Advance 60s — the old persisted interval. If the bug were present,
+    // the second poll would start now. With the fix, it should not.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pollCount).toBe(1);
+
+    // Advance 60s more (120s total) — the new X-Poll-Interval fires.
+    // Second poll should start now.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pollCount).toBe(2);
+
+    // Abort the loop and wait for clean shutdown
+    process.emit("SIGTERM");
+    await vi.advanceTimersByTimeAsync(0);
+    await watchPromise;
+  });
+});
