@@ -2,12 +2,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 vi.mock("./client.js", () => ({
   gh: vi.fn(),
+  ghWithHeaders: vi.fn(),
 }));
 
-import { gh } from "./client.js";
+import { gh, ghWithHeaders } from "./client.js";
 import {
   fetchNotifications,
   fetchMentionNotifications,
+  fetchMentionNotificationsConditional,
   markNotificationRead,
   fetchCommentBody,
   fetchRecentSubjectComments,
@@ -21,6 +23,7 @@ import type { RawNotification, CommentDetail } from "./notifications.js";
 import { CliError } from "../config/types.js";
 
 const mockedGh = vi.mocked(gh);
+const mockedGhWithHeaders = vi.mocked(ghWithHeaders);
 const repo = { owner: "hivemoot", repo: "colony" };
 
 beforeEach(() => {
@@ -664,5 +667,147 @@ describe("isAgentMentioned()", () => {
 
   it("returns false for empty body", () => {
     expect(isAgentMentioned("", "hivemoot-worker")).toBe(false);
+  });
+});
+
+describe("fetchMentionNotificationsConditional()", () => {
+  function makeRawNotification(overrides: Partial<RawNotification> = {}): RawNotification {
+    return {
+      id: "101",
+      unread: true,
+      reason: "mention",
+      updated_at: "2026-03-10T12:00:00Z",
+      subject: {
+        url: "https://api.github.com/repos/hivemoot/colony/issues/42",
+        type: "Issue",
+        title: "Test issue",
+        latest_comment_url: "https://api.github.com/repos/hivemoot/colony/issues/comments/99",
+      },
+      repository: { full_name: "hivemoot/colony" },
+      ...overrides,
+    };
+  }
+
+  function makeHeadersResponse(body: string, extraHeaders: Record<string, string> = {}) {
+    return {
+      notModified: false as const,
+      headers: {
+        "content-type": "application/json",
+        ...extraHeaders,
+      },
+      body,
+    };
+  }
+
+  it("returns notModified: false with filtered notifications on success", async () => {
+    const notification = makeRawNotification();
+    mockedGhWithHeaders.mockResolvedValue(
+      makeHeadersResponse(JSON.stringify([notification])),
+    );
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.notModified).toBe(false);
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0].id).toBe("101");
+  });
+
+  it("passes If-Modified-Since header when lastModified is provided", async () => {
+    mockedGhWithHeaders.mockResolvedValue(makeHeadersResponse("[]"));
+
+    await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"], "Mon, 10 Mar 2026 10:00:00 GMT");
+
+    expect(mockedGhWithHeaders).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        "-H",
+        "If-Modified-Since: Mon, 10 Mar 2026 10:00:00 GMT",
+      ]),
+    );
+  });
+
+  it("does not pass If-Modified-Since when lastModified is absent", async () => {
+    mockedGhWithHeaders.mockResolvedValue(makeHeadersResponse("[]"));
+
+    await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    const callArgs = mockedGhWithHeaders.mock.calls[0][0] as string[];
+    expect(callArgs).not.toContain("If-Modified-Since:");
+    expect(callArgs).not.toContain("-H");
+  });
+
+  it("returns notModified: true immediately on 304", async () => {
+    mockedGhWithHeaders.mockResolvedValue({ notModified: true });
+
+    const result = await fetchMentionNotificationsConditional(
+      "hivemoot/colony",
+      ["mention"],
+      "Mon, 10 Mar 2026 10:00:00 GMT",
+    );
+
+    expect(result.notModified).toBe(true);
+    expect(result.notifications).toHaveLength(0);
+  });
+
+  it("extracts Last-Modified from response headers", async () => {
+    mockedGhWithHeaders.mockResolvedValue(
+      makeHeadersResponse("[]", { "last-modified": "Mon, 10 Mar 2026 12:00:00 GMT" }),
+    );
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.lastModified).toBe("Mon, 10 Mar 2026 12:00:00 GMT");
+  });
+
+  it("extracts X-Poll-Interval from response headers", async () => {
+    mockedGhWithHeaders.mockResolvedValue(
+      makeHeadersResponse("[]", { "x-poll-interval": "60" }),
+    );
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.pollInterval).toBe(60);
+  });
+
+  it("leaves pollInterval undefined when X-Poll-Interval header is absent", async () => {
+    mockedGhWithHeaders.mockResolvedValue(makeHeadersResponse("[]"));
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.pollInterval).toBeUndefined();
+  });
+
+  it("filters out read notifications", async () => {
+    const unread = makeRawNotification({ id: "101", unread: true });
+    const read = makeRawNotification({ id: "102", unread: false });
+    mockedGhWithHeaders.mockResolvedValue(
+      makeHeadersResponse(JSON.stringify([unread, read])),
+    );
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0].id).toBe("101");
+  });
+
+  it("filters by reason", async () => {
+    const mention = makeRawNotification({ id: "101", reason: "mention" });
+    const comment = makeRawNotification({ id: "102", reason: "comment" });
+    mockedGhWithHeaders.mockResolvedValue(
+      makeHeadersResponse(JSON.stringify([mention, comment])),
+    );
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.notifications).toHaveLength(1);
+    expect(result.notifications[0].id).toBe("101");
+  });
+
+  it("returns empty notifications on body parse failure", async () => {
+    mockedGhWithHeaders.mockResolvedValue(makeHeadersResponse("not valid json"));
+
+    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+
+    expect(result.notModified).toBe(false);
+    expect(result.notifications).toHaveLength(0);
   });
 });

@@ -1,6 +1,6 @@
 import type { RepoRef, MentionEvent } from "../config/types.js";
 import { CliError } from "../config/types.js";
-import { gh } from "./client.js";
+import { gh, ghWithHeaders } from "./client.js";
 
 export interface NotificationInfo {
   threadId: string;   // GitHub notification thread ID — needed for ack
@@ -381,6 +381,83 @@ export async function fetchSubjectBodyResult(subjectUrl: string): Promise<FetchD
 export function isAgentMentioned(body: string, agent: string): boolean {
   const escaped = agent.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?<![a-zA-Z0-9._+-])@${escaped}(?![a-zA-Z0-9-])`, "i").test(body);
+}
+
+export interface ConditionalFetchResult {
+  notModified: boolean;
+  notifications: RawNotification[];
+  /** Value of the Last-Modified header from the response, to pass as If-Modified-Since on the next request. */
+  lastModified?: string;
+  /** Value of the X-Poll-Interval header (seconds) from the response. */
+  pollInterval?: number;
+}
+
+/**
+ * Fetch unread mention notifications for a repo using conditional HTTP requests.
+ *
+ * When `lastModified` is provided it is sent as `If-Modified-Since`. If GitHub
+ * responds with HTTP 304 (Nothing changed), this function returns immediately
+ * with `notModified: true` — consuming zero rate-limit quota.
+ *
+ * The `X-Poll-Interval` header value (when present) is returned so callers can
+ * adjust their sleep interval to match GitHub's recommended minimum.
+ *
+ * Uses a single non-paginated request with per_page=100, which covers the
+ * practical range of unread notifications for any repository. If >100 unread
+ * notifications exist (extremely rare), the surplus is processed on the next
+ * poll cycle.
+ */
+export async function fetchMentionNotificationsConditional(
+  repo: string,
+  reasons: string[],
+  lastModified?: string,
+): Promise<ConditionalFetchResult> {
+  const params = new URLSearchParams({ all: "false", per_page: "100" });
+  const args = ["api", "-i"];
+  if (lastModified) {
+    args.push("-H", `If-Modified-Since: ${lastModified}`);
+  }
+  args.push(`/repos/${repo}/notifications?${params}`);
+
+  const result = await ghWithHeaders(args);
+
+  if (result.notModified) {
+    return { notModified: true, notifications: [] };
+  }
+
+  const { headers, body } = result;
+
+  const pollIntervalRaw = headers["x-poll-interval"];
+  const pollIntervalSeconds = pollIntervalRaw ? parseInt(pollIntervalRaw, 10) : NaN;
+  const pollInterval = Number.isFinite(pollIntervalSeconds) && pollIntervalSeconds > 0
+    ? pollIntervalSeconds
+    : undefined;
+
+  const newLastModified = headers["last-modified"] ?? undefined;
+
+  let notifications: RawNotification[] = [];
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (Array.isArray(parsed)) {
+      notifications = parsed as RawNotification[];
+    }
+  } catch {
+    // body parse failure: return empty list, caller will retry next poll
+  }
+
+  const filtered = notifications.filter((n) => {
+    if (!n.unread) return false;
+    if (!reasons.includes(n.reason)) return false;
+    if (n.subject.type !== "Issue" && n.subject.type !== "PullRequest") return false;
+    return true;
+  });
+
+  return {
+    notModified: false,
+    notifications: filtered,
+    lastModified: newLastModified,
+    pollInterval,
+  };
 }
 
 /**

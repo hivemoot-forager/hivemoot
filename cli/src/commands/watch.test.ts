@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { WatchState } from "../watch/state.js";
-import type { RawNotification, CommentDetail } from "../github/notifications.js";
+import type { RawNotification, CommentDetail, ConditionalFetchResult } from "../github/notifications.js";
 import type { MentionEvent } from "../config/types.js";
 import { CliError } from "../config/types.js";
 
@@ -9,7 +9,7 @@ vi.mock("../github/user.js", () => ({
 }));
 
 vi.mock("../github/notifications.js", () => ({
-  fetchMentionNotifications: vi.fn(),
+  fetchMentionNotificationsConditional: vi.fn(),
   fetchCommentBody: vi.fn(),
   fetchRecentSubjectComments: vi.fn(),
   fetchSubjectBodyResult: vi.fn(),
@@ -30,7 +30,7 @@ vi.mock("../watch/state.js", async (importOriginal) => {
 import { watchCommand } from "./watch.js";
 import { fetchCurrentUser } from "../github/user.js";
 import {
-  fetchMentionNotifications,
+  fetchMentionNotificationsConditional,
   fetchCommentBody,
   fetchRecentSubjectComments,
   fetchSubjectBodyResult,
@@ -40,7 +40,7 @@ import {
 import { loadState, saveState, mergeAckJournal } from "../watch/state.js";
 
 const mockedFetchUser = vi.mocked(fetchCurrentUser);
-const mockedFetchMentions = vi.mocked(fetchMentionNotifications);
+const mockedFetchMentions = vi.mocked(fetchMentionNotificationsConditional);
 const mockedFetchComment = vi.mocked(fetchCommentBody);
 const mockedFetchRecentComments = vi.mocked(fetchRecentSubjectComments);
 const mockedFetchSubjectResult = vi.mocked(fetchSubjectBodyResult);
@@ -85,6 +85,17 @@ function makeEvent(overrides: Partial<MentionEvent> = {}): MentionEvent {
   };
 }
 
+function makeConditionalResult(
+  notifications: RawNotification[],
+  opts: { lastModified?: string; pollInterval?: number } = {},
+): ConditionalFetchResult {
+  return {
+    notModified: false,
+    notifications,
+    ...opts,
+  };
+}
+
 function defaultState(overrides: Partial<WatchState> = {}): WatchState {
   return {
     lastChecked: "2026-02-01T10:00:00.000Z",
@@ -105,7 +116,7 @@ beforeEach(() => {
   mockedFetchUser.mockResolvedValue("test-agent");
   mockedLoadState.mockResolvedValue(defaultState());
   mockedSaveState.mockResolvedValue(undefined);
-  mockedFetchMentions.mockResolvedValue([]);
+  mockedFetchMentions.mockResolvedValue(makeConditionalResult([]));
   mockedIsAgentMentioned.mockReturnValue(true);
   mockedFetchRecentComments.mockResolvedValue({
     comments: [],
@@ -139,7 +150,7 @@ describe("watchCommand (--once mode)", () => {
     };
     const event = makeEvent();
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(comment);
     mockedBuildEvent.mockReturnValue(event);
 
@@ -151,13 +162,83 @@ describe("watchCommand (--once mode)", () => {
     expect(mockedSaveState).toHaveBeenCalled();
   });
 
-  it("calls fetchMentionNotifications without since parameter", async () => {
+  it("calls fetchMentionNotificationsConditional with repo, reasons, and no lastModified on first poll", async () => {
     await watchCommand({ repo: "owner/repo", once: true });
 
     expect(mockedFetchMentions).toHaveBeenCalledWith(
       "owner/repo",
       ["mention"],
+      undefined,
     );
+  });
+
+  it("passes stored lastModified as If-Modified-Since on subsequent polls", async () => {
+    mockedLoadState.mockResolvedValue(defaultState({
+      notificationsPollState: {
+        "owner/repo": { lastModified: "Mon, 01 Jan 2026 10:00:00 GMT" },
+      },
+    }));
+
+    await watchCommand({ repo: "owner/repo", once: true });
+
+    expect(mockedFetchMentions).toHaveBeenCalledWith(
+      "owner/repo",
+      ["mention"],
+      "Mon, 01 Jan 2026 10:00:00 GMT",
+    );
+  });
+
+  it("saves lastModified from response into state", async () => {
+    mockedFetchMentions.mockResolvedValue(
+      makeConditionalResult([], { lastModified: "Mon, 10 Mar 2026 12:00:00 GMT" }),
+    );
+
+    await watchCommand({ repo: "owner/repo", once: true });
+
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        notificationsPollState: expect.objectContaining({
+          "owner/repo": expect.objectContaining({
+            lastModified: "Mon, 10 Mar 2026 12:00:00 GMT",
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("saves pollInterval from X-Poll-Interval into state", async () => {
+    mockedFetchMentions.mockResolvedValue(
+      makeConditionalResult([], { pollInterval: 60 }),
+    );
+
+    await watchCommand({ repo: "owner/repo", once: true });
+
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        notificationsPollState: expect.objectContaining({
+          "owner/repo": expect.objectContaining({
+            pollInterval: 60,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("skips processing and saves state when 304 Not Modified", async () => {
+    mockedFetchMentions.mockResolvedValue({ notModified: true, notifications: [] });
+
+    await watchCommand({ repo: "owner/repo", once: true });
+
+    // No notifications to process — no comment fetch, no event build
+    expect(mockedFetchComment).not.toHaveBeenCalled();
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    // But state is still saved (with updated lastChecked)
+    expect(mockedSaveState).toHaveBeenCalled();
+    // And a log message is written
+    const stderrCalls = (stderrSpy.mock.calls as [string][]).map(([s]) => s);
+    expect(stderrCalls.some((s) => s.includes("304 Not Modified"))).toBe(true);
   });
 
   it("merges ack journal at start of poll", async () => {
@@ -169,7 +250,7 @@ describe("watchCommand (--once mode)", () => {
 
     // This notification matches the acked key — should be skipped
     const notification = makeNotification();
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
 
     await watchCommand({ repo: "owner/repo", once: true });
 
@@ -187,7 +268,7 @@ describe("watchCommand (--once mode)", () => {
     mockedMergeAckJournal.mockImplementation(async (_path, state) => state);
 
     const notification = makeNotification();
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue({
       body: "test",
       author: "user",
@@ -210,7 +291,7 @@ describe("watchCommand (--once mode)", () => {
 
     // Same thread ID, but newer updated_at — should be treated as new event
     const notification = makeNotification({ updated_at: "2026-02-01T11:30:00.000Z" });
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue({
       body: "new mention",
       author: "someone",
@@ -233,7 +314,7 @@ describe("watchCommand (--once mode)", () => {
     mockedFetchMentions.mockImplementation(async () => {
       // Simulate 5 seconds of network latency
       vi.advanceTimersByTime(5000);
-      return [makeNotification()];
+      return makeConditionalResult([makeNotification()]);
     });
     mockedFetchComment.mockImplementation(async () => {
       // Simulate 3 seconds of comment-fetch latency
@@ -284,7 +365,7 @@ describe("watchCommand (--once mode)", () => {
 
   it("retries when comment fetch returns null (does not mark processed)", async () => {
     const notification = makeNotification();
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(null);
 
     await watchCommand({ repo: "owner/repo", once: true });
@@ -327,7 +408,7 @@ describe("watchCommand (--once mode)", () => {
       htmlUrl: "https://github.com/owner/repo/issues/42#issuecomment-999",
     };
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(comment);
     mockedIsAgentMentioned.mockReturnValue(false);
 
@@ -358,7 +439,7 @@ describe("watchCommand (--once mode)", () => {
     };
     const event = makeEvent();
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(comment);
     mockedIsAgentMentioned.mockReturnValue(true);
     mockedBuildEvent.mockReturnValue(event);
@@ -378,7 +459,7 @@ describe("watchCommand (--once mode)", () => {
     };
     const event = makeEvent();
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(comment);
     mockedBuildEvent.mockReturnValue(event);
 
@@ -404,7 +485,7 @@ describe("watchCommand (--once mode)", () => {
     };
     const event = makeEvent({ body: matchingComment.body, url: matchingComment.htmlUrl });
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(latestComment);
     mockedFetchRecentComments.mockResolvedValue({
       comments: [matchingComment],
@@ -436,7 +517,7 @@ describe("watchCommand (--once mode)", () => {
       htmlUrl: "https://github.com/owner/repo/issues/42#issuecomment-1000",
     };
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchComment.mockResolvedValue(latestComment);
     // Simulates fetchRecentSubjectComments filtering out older historical mentions.
     mockedFetchRecentComments.mockResolvedValue({
@@ -480,7 +561,7 @@ describe("watchCommand (--once mode)", () => {
       htmlUrl: "https://github.com/owner/repo/issues/42",
     };
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchSubjectResult.mockResolvedValue({
       detail: subjectBody,
       permanentFailure: false,
@@ -507,7 +588,7 @@ describe("watchCommand (--once mode)", () => {
         latest_comment_url: null,
       },
     });
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchSubjectResult.mockResolvedValue({
       detail: {
         body: "@someone-else check this",
@@ -551,7 +632,7 @@ describe("watchCommand (--once mode)", () => {
     };
     const event = makeEvent({ body: matchingComment.body, url: matchingComment.htmlUrl });
 
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchSubjectResult.mockResolvedValue({
       detail: {
         body: "PR description without any mention",
@@ -589,7 +670,7 @@ describe("watchCommand (--once mode)", () => {
         latest_comment_url: null,
       },
     });
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchSubjectResult.mockResolvedValue({
       detail: null,
       permanentFailure: false,
@@ -615,7 +696,7 @@ describe("watchCommand (--once mode)", () => {
         latest_comment_url: null,
       },
     });
-    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchMentions.mockResolvedValue(makeConditionalResult([notification]));
     mockedFetchSubjectResult.mockResolvedValue({
       detail: null,
       permanentFailure: true,

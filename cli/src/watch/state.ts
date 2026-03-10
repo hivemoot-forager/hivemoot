@@ -5,9 +5,18 @@ import { CliError } from "../config/types.js";
 
 const MAX_PROCESSED_IDS = 200;
 
+export interface NotificationsPollState {
+  /** Last-Modified header value from the most recent successful fetch, used as If-Modified-Since. */
+  lastModified?: string;
+  /** X-Poll-Interval from the most recent response (seconds). Overrides the configured interval when larger. */
+  pollInterval?: number;
+}
+
 export interface WatchState {
   lastChecked: string;           // ISO 8601 timestamp
   processedThreadIds: string[];  // rolling window of thread IDs already handled
+  /** Per-repo conditional request state, keyed by "owner/repo". */
+  notificationsPollState?: Record<string, NotificationsPollState>;
 }
 
 export interface LoadStateResult {
@@ -106,10 +115,15 @@ export async function loadStateWithStatus(filePath: string): Promise<LoadStateRe
     }
 
     const processedThreadIds = parsed.processedThreadIds.filter((id): id is string => typeof id === "string");
+
+    // notificationsPollState is optional and backward-compatible — load it when present and valid
+    const notificationsPollState = parseNotificationsPollState(parsed.notificationsPollState);
+
     return {
       state: {
         lastChecked: parsed.lastChecked,
         processedThreadIds,
+        ...(notificationsPollState !== undefined ? { notificationsPollState } : {}),
       },
       degraded: false,
     };
@@ -120,6 +134,35 @@ export async function loadStateWithStatus(filePath: string): Promise<LoadStateRe
       reason: "read error",
     };
   }
+}
+
+/**
+ * Parse the notificationsPollState field from persisted JSON.
+ * Returns undefined if the value is absent or not a plain object.
+ * Invalid per-repo entries are silently skipped; the field is optional.
+ */
+function parseNotificationsPollState(
+  raw: unknown,
+): Record<string, NotificationsPollState> | undefined {
+  if (raw === null || raw === undefined) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
+
+  const result: Record<string, NotificationsPollState> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof key !== "string" || typeof value !== "object" || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const entry = value as Record<string, unknown>;
+    const pollState: NotificationsPollState = {};
+    if (typeof entry.lastModified === "string" && entry.lastModified) {
+      pollState.lastModified = entry.lastModified;
+    }
+    if (typeof entry.pollInterval === "number" && entry.pollInterval > 0 && Number.isFinite(entry.pollInterval)) {
+      pollState.pollInterval = entry.pollInterval;
+    }
+    result[key] = pollState;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 /** Atomically save state to disk (write to temp, then rename). */
@@ -133,6 +176,7 @@ export async function saveState(filePath: string, state: WatchState): Promise<vo
   const trimmed: WatchState = {
     lastChecked: state.lastChecked,
     processedThreadIds: state.processedThreadIds.slice(-MAX_PROCESSED_IDS),
+    ...(state.notificationsPollState ? { notificationsPollState: state.notificationsPollState } : {}),
   };
 
   try {

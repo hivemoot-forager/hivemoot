@@ -3,7 +3,7 @@ import { CliError } from "../config/types.js";
 import { fetchCurrentUser } from "../github/user.js";
 import type { CommentDetail } from "../github/notifications.js";
 import {
-  fetchMentionNotifications,
+  fetchMentionNotificationsConditional,
   fetchCommentBody,
   fetchRecentSubjectComments,
   fetchSubjectBodyResult,
@@ -11,6 +11,7 @@ import {
   isAgentMentioned,
 } from "../github/notifications.js";
 import { loadState, saveState, mergeAckJournal, addProcessedId, buildLatestProcessedByThread } from "../watch/state.js";
+import type { NotificationsPollState } from "../watch/state.js";
 
 function log(message: string): void {
   process.stderr.write(`[watch ${new Date().toISOString()}] ${message}\n`);
@@ -117,7 +118,7 @@ export async function watchCommand(options: WatchOptions): Promise<void> {
     );
   }
 
-  log(`Starting watch: repo=${repo} agent=${agent} interval=${options.interval ?? 300}s reasons=${reasons.join(",")}`);
+  log(`Starting watch: repo=${repo} agent=${agent} min-interval=${options.interval ?? 300}s reasons=${reasons.join(",")}`);
 
   const abortController = new AbortController();
   let shutdownRequested = false;
@@ -157,10 +158,44 @@ async function runPollLoop(
     state = await mergeAckJournal(stateFile, state);
     const latestProcessedByThread = buildLatestProcessedByThread(state.processedThreadIds);
 
+    // Effective sleep duration: max(configured interval, X-Poll-Interval from GitHub)
+    const repoPollState: NotificationsPollState | undefined = state.notificationsPollState?.[repo];
+    const githubPollMs = repoPollState?.pollInterval ? repoPollState.pollInterval * 1000 : 0;
+    const effectiveSleepMs = Math.max(intervalMs, githubPollMs);
+
     try {
       // Capture time before fetch (informational — no longer used as fetch cursor)
       const fetchTime = new Date().toISOString();
-      const notifications = await fetchMentionNotifications(repo, reasons);
+      const conditionalResult = await fetchMentionNotificationsConditional(
+        repo,
+        reasons,
+        repoPollState?.lastModified,
+      );
+
+      if (conditionalResult.notModified) {
+        log(`304 Not Modified — no new notifications, skipping processing`);
+        state = { ...state, lastChecked: fetchTime };
+        await saveState(stateFile, state);
+
+        if (once) break;
+        await sleep(effectiveSleepMs, signal);
+        continue;
+      }
+
+      // Update per-repo poll state with the latest Last-Modified and X-Poll-Interval
+      const newRepoPollState: NotificationsPollState = {
+        ...(conditionalResult.lastModified ? { lastModified: conditionalResult.lastModified } : repoPollState?.lastModified ? { lastModified: repoPollState.lastModified } : {}),
+        ...(conditionalResult.pollInterval ? { pollInterval: conditionalResult.pollInterval } : repoPollState?.pollInterval ? { pollInterval: repoPollState.pollInterval } : {}),
+      };
+      state = {
+        ...state,
+        notificationsPollState: {
+          ...state.notificationsPollState,
+          [repo]: newRepoPollState,
+        },
+      };
+
+      const notifications = conditionalResult.notifications;
 
       for (const notification of notifications) {
         if (signal.aborted) break;
@@ -303,6 +338,6 @@ async function runPollLoop(
 
     if (once) break;
 
-    await sleep(intervalMs, signal);
+    await sleep(effectiveSleepMs, signal);
   }
 }
