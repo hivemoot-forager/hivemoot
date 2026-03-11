@@ -693,7 +693,7 @@ describe("fetchReviewRequestState", () => {
 
     const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
 
-    expect(result).toEqual({ pending: true, permanentFailure: false });
+    expect(result).toEqual({ pending: true, permanentFailure: false, transientFailure: false });
     expect(mockedGh).toHaveBeenCalledWith(expect.arrayContaining([
       "/repos/owner/repo/pulls/42/requested_reviewers",
     ]));
@@ -704,7 +704,7 @@ describe("fetchReviewRequestState", () => {
 
     const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
 
-    expect(result).toEqual({ pending: false, permanentFailure: false });
+    expect(result).toEqual({ pending: false, permanentFailure: false, transientFailure: false });
   });
 
   it("returns pending=false with empty list when no reviewers are requested", async () => {
@@ -712,7 +712,7 @@ describe("fetchReviewRequestState", () => {
 
     const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
 
-    expect(result).toEqual({ pending: false, permanentFailure: false });
+    expect(result).toEqual({ pending: false, permanentFailure: false, transientFailure: false });
   });
 
   it("is case-insensitive for agent login comparison", async () => {
@@ -720,22 +720,22 @@ describe("fetchReviewRequestState", () => {
 
     const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
 
-    expect(result).toEqual({ pending: true, permanentFailure: false });
+    expect(result).toEqual({ pending: true, permanentFailure: false, transientFailure: false });
   });
 
-  it("returns permanentFailure=true on 403/404 errors", async () => {
+  it("returns permanentFailure=true and transientFailure=false on 403/404 errors", async () => {
     mockedGh.mockRejectedValue(new CliError("HTTP 404", "GH_NOT_FOUND", 1));
 
     const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
 
-    expect(result).toEqual({ pending: false, permanentFailure: true });
+    expect(result).toEqual({ pending: false, permanentFailure: true, transientFailure: false });
   });
 
-  it("returns permanentFailure=false on transient errors", async () => {
+  it("returns transientFailure=true and permanentFailure=false on transient errors", async () => {
     mockedGh.mockRejectedValue(new Error("network error"));
 
     const result = await fetchReviewRequestState("owner", "repo", 42, "hivemoot-forager");
 
-    expect(result).toEqual({ pending: false, permanentFailure: false });
+    expect(result).toEqual({ pending: false, permanentFailure: false, transientFailure: true });
   });
 });

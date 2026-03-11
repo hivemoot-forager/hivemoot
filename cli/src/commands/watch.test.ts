@@ -679,7 +679,7 @@ describe("watchCommand (review_requested reason)", () => {
     };
 
     mockedFetchMentions.mockResolvedValue([notification]);
-    mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false });
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
     mockedBuildEvent.mockReturnValue(event);
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
@@ -693,7 +693,7 @@ describe("watchCommand (review_requested reason)", () => {
     const notification = makePrNotification();
 
     mockedFetchMentions.mockResolvedValue([notification]);
-    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: false });
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: false, transientFailure: false });
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
@@ -715,7 +715,7 @@ describe("watchCommand (review_requested reason)", () => {
     const notification = makePrNotification();
 
     mockedFetchMentions.mockResolvedValue([notification]);
-    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: true });
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: true, transientFailure: false });
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
@@ -724,6 +724,24 @@ describe("watchCommand (review_requested reason)", () => {
       expect.any(String),
       expect.objectContaining({
         processedThreadIds: ["2001:2026-03-10T10:00:00.000Z"],
+      }),
+    );
+  });
+
+  it("skips notification without marking processed when requested_reviewers fetch fails transiently", async () => {
+    const notification = makePrNotification();
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: false, transientFailure: true });
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    // Must NOT be written into processedThreadIds — it should be retried next poll
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        processedThreadIds: [],
       }),
     );
   });

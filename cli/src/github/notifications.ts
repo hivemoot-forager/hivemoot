@@ -379,6 +379,8 @@ export interface ReviewRequestState {
   requestedBy?: string;
   /** True when the GitHub API returned a permanent error (403/404). */
   permanentFailure: boolean;
+  /** True when the fetch failed transiently (network error, rate-limit, etc.) — caller should retry next poll. */
+  transientFailure: boolean;
 }
 
 /**
@@ -403,9 +405,10 @@ export async function fetchReviewRequestState(
     ]);
     const logins = raw.trim() ? raw.trim().split(",") : [];
     const pending = logins.some((l) => l.toLowerCase() === agent.toLowerCase());
-    return { pending, permanentFailure: false };
+    return { pending, permanentFailure: false, transientFailure: false };
   } catch (err) {
-    return { pending: false, permanentFailure: isPermanentFetchError(err) };
+    const permanent = isPermanentFetchError(err);
+    return { pending: false, permanentFailure: permanent, transientFailure: !permanent };
   }
 }
 

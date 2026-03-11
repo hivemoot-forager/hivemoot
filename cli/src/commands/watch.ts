@@ -298,6 +298,10 @@ async function runPollLoop(
           const [repoOwner, repoName] = repo.split("/");
           const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
           if (!reviewState.pending) {
+            if (reviewState.transientFailure) {
+              log(`Skipping ${notification.id}: requested_reviewers fetch failed transiently, will retry`);
+              continue;
+            }
             if (reviewState.permanentFailure) {
               log(`Skipping ${notification.id}: requested_reviewers fetch failed permanently, marking processed`);
             } else {
