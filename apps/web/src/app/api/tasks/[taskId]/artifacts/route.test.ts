@@ -202,4 +202,12 @@ describe("POST /api/tasks/[taskId]/artifacts", () => {
     );
     expect(res.status).toBe(200);
   });
+
+  it("returns 500 JSON when appendTaskArtifacts throws", async () => {
+    vi.mocked(appendTaskArtifacts).mockRejectedValue(new Error("Redis connection lost"));
+    const res = await POST(makeRequest({ artifacts: [VALID_ARTIFACT] }));
+    expect(res.status).toBe(500);
+    const data = await res.json();
+    expect(data.code).toBe("task_server_error");
+  });
 });

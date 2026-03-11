@@ -86,92 +86,97 @@ function parseArtifacts(raw: unknown, taskRepos: string[]): TaskArtifact[] | str
 }
 
 export async function POST(request: NextRequest) {
-  const auth = await authenticateTaskExecutorRequest(request);
-  if (!auth.ok) return auth.response;
-
-  const { pathname } = new URL(request.url);
-  const taskId = extractTaskId(pathname);
-  if (!taskId || !TASK_ID_PATTERN.test(taskId)) {
-    return taskError(TASK_ERROR.INVALID_TASK_ID, "Invalid task id", 400);
-  }
-
-  const contentLength = parseContentLength(request.headers.get("content-length"));
-  if (contentLength !== null && contentLength > MAX_PAYLOAD_BYTES) {
-    return taskError(TASK_ERROR.PAYLOAD_TOO_LARGE, "Payload too large (max 32KB)", 413);
-  }
-
-  let bodyText: string;
   try {
-    bodyText = await request.text();
-  } catch {
-    return taskError(TASK_ERROR.INVALID_JSON, "Invalid JSON body", 400);
-  }
+    const auth = await authenticateTaskExecutorRequest(request);
+    if (!auth.ok) return auth.response;
 
-  if (textEncoder.encode(bodyText).length > MAX_PAYLOAD_BYTES) {
-    return taskError(TASK_ERROR.PAYLOAD_TOO_LARGE, "Payload too large (max 32KB)", 413);
-  }
+    const { pathname } = new URL(request.url);
+    const taskId = extractTaskId(pathname);
+    if (!taskId || !TASK_ID_PATTERN.test(taskId)) {
+      return taskError(TASK_ERROR.INVALID_TASK_ID, "Invalid task id", 400);
+    }
 
-  let body: unknown;
-  try {
-    body = JSON.parse(bodyText);
-  } catch {
-    return taskError(TASK_ERROR.INVALID_JSON, "Invalid JSON body", 400);
-  }
+    const contentLength = parseContentLength(request.headers.get("content-length"));
+    if (contentLength !== null && contentLength > MAX_PAYLOAD_BYTES) {
+      return taskError(TASK_ERROR.PAYLOAD_TOO_LARGE, "Payload too large (max 32KB)", 413);
+    }
 
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return taskError(TASK_ERROR.VALIDATION_FAILED, "Body must be a JSON object", 400);
-  }
+    let bodyText: string;
+    try {
+      bodyText = await request.text();
+    } catch {
+      return taskError(TASK_ERROR.INVALID_JSON, "Invalid JSON body", 400);
+    }
 
-  const existingTask = await getTask(auth.installationId, taskId, auth.redis);
-  if (!existingTask) {
-    return taskError(TASK_ERROR.TASK_NOT_FOUND, "Task not found", 404);
-  }
+    if (textEncoder.encode(bodyText).length > MAX_PAYLOAD_BYTES) {
+      return taskError(TASK_ERROR.PAYLOAD_TOO_LARGE, "Payload too large (max 32KB)", 413);
+    }
 
-  const claimToken = request.headers.get("x-task-claim-token")?.trim() ?? "";
-  if (!claimToken) {
-    return taskError(TASK_ERROR.FORBIDDEN, "Missing task claim token", 403);
-  }
+    let body: unknown;
+    try {
+      body = JSON.parse(bodyText);
+    } catch {
+      return taskError(TASK_ERROR.INVALID_JSON, "Invalid JSON body", 400);
+    }
 
-  const validClaimToken = await verifyTaskClaimToken(
-    auth.installationId,
-    taskId,
-    claimToken,
-    auth.redis,
-  );
-  if (!validClaimToken) {
-    return taskError(TASK_ERROR.FORBIDDEN, "Invalid or expired task claim token", 403);
-  }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return taskError(TASK_ERROR.VALIDATION_FAILED, "Body must be a JSON object", 400);
+    }
 
-  const obj = body as Record<string, unknown>;
-  const parsedArtifacts = parseArtifacts(obj.artifacts, existingTask.repos);
-  if (typeof parsedArtifacts === "string") {
-    return taskError(TASK_ERROR.VALIDATION_FAILED, parsedArtifacts, 400);
-  }
-
-  const result = await appendTaskArtifacts(
-    auth.installationId,
-    taskId,
-    parsedArtifacts,
-    auth.redis,
-  );
-
-  if (!result.ok) {
-    if (result.reason === "not_found") {
+    const existingTask = await getTask(auth.installationId, taskId, auth.redis);
+    if (!existingTask) {
       return taskError(TASK_ERROR.TASK_NOT_FOUND, "Task not found", 404);
     }
-    if (result.reason === "limit_exceeded") {
+
+    const claimToken = request.headers.get("x-task-claim-token")?.trim() ?? "";
+    if (!claimToken) {
+      return taskError(TASK_ERROR.FORBIDDEN, "Missing task claim token", 403);
+    }
+
+    const validClaimToken = await verifyTaskClaimToken(
+      auth.installationId,
+      taskId,
+      claimToken,
+      auth.redis,
+    );
+    if (!validClaimToken) {
+      return taskError(TASK_ERROR.FORBIDDEN, "Invalid or expired task claim token", 403);
+    }
+
+    const obj = body as Record<string, unknown>;
+    const parsedArtifacts = parseArtifacts(obj.artifacts, existingTask.repos);
+    if (typeof parsedArtifacts === "string") {
+      return taskError(TASK_ERROR.VALIDATION_FAILED, parsedArtifacts, 400);
+    }
+
+    const result = await appendTaskArtifacts(
+      auth.installationId,
+      taskId,
+      parsedArtifacts,
+      auth.redis,
+    );
+
+    if (!result.ok) {
+      if (result.reason === "not_found") {
+        return taskError(TASK_ERROR.TASK_NOT_FOUND, "Task not found", 404);
+      }
+      if (result.reason === "limit_exceeded") {
+        return taskError(
+          TASK_ERROR.VALIDATION_FAILED,
+          `Artifact limit reached (max ${MAX_ARTIFACTS_PER_TASK} per task)`,
+          422,
+        );
+      }
       return taskError(
-        TASK_ERROR.VALIDATION_FAILED,
-        `Artifact limit reached (max ${MAX_ARTIFACTS_PER_TASK} per task)`,
-        422,
+        TASK_ERROR.LOCK_TIMEOUT,
+        "Task state is temporarily busy, retry shortly",
+        429,
       );
     }
-    return taskError(
-      TASK_ERROR.LOCK_TIMEOUT,
-      "Task state is temporarily busy, retry shortly",
-      429,
-    );
-  }
 
-  return NextResponse.json({ artifacts: result.artifacts });
+    return NextResponse.json({ artifacts: result.artifacts });
+  } catch (error) {
+    console.error("[artifacts] Unhandled error in POST /api/tasks/[taskId]/artifacts", { error });
+    return taskError(TASK_ERROR.SERVER_ERROR, "Internal server error", 500);
+  }
 }
