@@ -770,7 +770,7 @@ describe("watchCommand (review_requested reason)", () => {
     );
   });
 
-  it("adds thread to activeReviewRequests after first emission, keyed by updatedAt", async () => {
+  it("adds thread to activeReviewRequests after first emission", async () => {
     const notification = makePrNotification();
     const event: MentionEvent = {
       agent: "test-agent",
@@ -793,70 +793,56 @@ describe("watchCommand (review_requested reason)", () => {
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
     const savedState = (mockedSaveState.mock.calls[0] as [string, WatchState])[1];
-    // activeReviewRequests is now a Record mapping notificationId → updatedAt at emission
-    expect(savedState.activeReviewRequests).toEqual({ "2001": "2026-03-10T10:00:00.000Z" });
+    // activeReviewRequests is a string[] of notification IDs with in-flight requests
+    expect(savedState.activeReviewRequests).toEqual(["2001"]);
     // processedThreadIds must NOT contain this thread — active review requests are tracked separately
     expect(savedState.processedThreadIds).not.toContain("2001:2026-03-10T10:00:00.000Z");
   });
 
-  it("skips re-emission when thread is in activeReviewRequests with same updatedAt and still pending", async () => {
-    // Notification has the same updated_at as when it was emitted — just PR activity keeping it in the inbox
+  it("skips re-emission when thread is in activeReviewRequests and still pending", async () => {
     const notification = makePrNotification({ updated_at: "2026-03-10T10:00:00.000Z" });
 
     mockedLoadState.mockResolvedValue(defaultState({
-      activeReviewRequests: { "2001": "2026-03-10T10:00:00.000Z" },
+      activeReviewRequests: ["2001"],
     }));
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
-    // Should NOT re-emit the event — same notification state as at emission time
+    // Should NOT re-emit — review request already emitted and still pending
     expect(mockedBuildEvent).not.toHaveBeenCalled();
     expect(stdoutSpy).not.toHaveBeenCalled();
     const savedState = (mockedSaveState.mock.calls[0] as [string, WatchState])[1];
-    expect(savedState.activeReviewRequests).toEqual({ "2001": "2026-03-10T10:00:00.000Z" });
+    expect(savedState.activeReviewRequests).toEqual(["2001"]);
   });
 
-  it("re-emits when thread advances past emittedAt and is still pending (new review cycle)", async () => {
-    // Notification updated_at has advanced — agent reviewed and was re-requested between polls
+  it("suppresses re-emission when PR activity bumps updated_at while review still pending", async () => {
+    // updated_at has advanced (new commit/comment on the PR), but the review
+    // request itself has not changed. This must NOT emit a new event — #335.
     const notification = makePrNotification({ updated_at: "2026-03-10T14:00:00.000Z" });
-    const event: MentionEvent = {
-      agent: "test-agent",
-      repo: "owner/repo",
-      number: 99,
-      type: "PullRequest",
-      title: "Add feature X",
-      author: "unknown",
-      body: "",
-      url: "",
-      threadId: "2001",
-      timestamp: "2026-03-10T14:00:00.000Z",
-      trigger: "review_requested",
-    };
 
     mockedLoadState.mockResolvedValue(defaultState({
-      // Stored at original emission time
-      activeReviewRequests: { "2001": "2026-03-10T10:00:00.000Z" },
+      activeReviewRequests: ["2001"],
     }));
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
-    mockedBuildEvent.mockReturnValue(event);
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
-    // Should re-emit and update the stored emittedAt to the new updatedAt
-    expect(mockedBuildEvent).toHaveBeenCalledWith(notification, null, "test-agent", { trigger: "review_requested" });
-    expect(stdoutSpy).toHaveBeenCalledWith(JSON.stringify(event) + "\n");
+    // Must NOT re-emit — plain PR activity should not produce duplicate review_requested events
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
     const savedState = (mockedSaveState.mock.calls[0] as [string, WatchState])[1];
-    expect(savedState.activeReviewRequests).toEqual({ "2001": "2026-03-10T14:00:00.000Z" });
+    // Thread remains in activeReviewRequests — request is still outstanding
+    expect(savedState.activeReviewRequests).toEqual(["2001"]);
   });
 
   it("clears activeReviewRequests entry when review is no longer pending", async () => {
     const notification = makePrNotification({ updated_at: "2026-03-10T14:00:00.000Z" });
 
     mockedLoadState.mockResolvedValue(defaultState({
-      activeReviewRequests: { "2001": "2026-03-10T10:00:00.000Z" },
+      activeReviewRequests: ["2001"],
     }));
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: false, transientFailure: false });

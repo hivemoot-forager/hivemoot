@@ -194,11 +194,11 @@ async function runPollLoop(
           }
           const [repoOwner, repoName] = repo.split("/");
 
-          const emittedAt = state.activeReviewRequests?.[notification.id];
-          if (emittedAt !== undefined) {
-            // We previously emitted for this thread. Determine if the notification
-            // has advanced since emission — which may indicate a new review-request
-            // cycle (agent reviewed and was re-requested between polls).
+          if (state.activeReviewRequests?.includes(notification.id)) {
+            // We previously emitted for this thread. Check if the request is
+            // still outstanding before deciding to suppress or clear.
+            // Suppression prevents PR activity (new commits, comments that bump
+            // updated_at) from generating duplicate review_requested events.
             const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
             if (reviewState.transientFailure) {
               log(`Skipping ${notification.id}: active review request state fetch failed transiently, will retry`);
@@ -212,28 +212,11 @@ async function runPollLoop(
               latestProcessedByThread.set(notification.id, notification.updated_at);
               continue;
             }
-            // Still pending. Check if the notification advanced since we emitted.
-            // An advancement means either PR activity OR a new review-request cycle
-            // (the agent reviewed and was re-requested between polls). We cannot
-            // distinguish the two from the API alone, so we re-emit to avoid
-            // silently dropping a genuine re-request.
-            if (emittedAt !== "" && notification.updated_at <= emittedAt) {
-              // Notification unchanged since emission — same in-flight request.
-              log(`Skipping ${notification.id}: review request already emitted and unchanged since emission`);
-              latestProcessedByThread.set(notification.id, notification.updated_at);
-              continue;
-            }
-            // Notification advanced (or emittedAt is legacy sentinel "").
-            // Re-emit and update the stored emittedAt so future polls compare
-            // against this new baseline.
-            log(`${notification.id}: review request notification advanced (${emittedAt || "legacy"} → ${notification.updated_at}), re-emitting`);
-            const reReviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
-            if (reReviewEvent) {
-              process.stdout.write(JSON.stringify(reReviewEvent) + "\n");
-              state = removeActiveReviewRequest(state, notification.id);
-              state = addActiveReviewRequest(state, notification.id, notification.updated_at);
-              latestProcessedByThread.set(notification.id, notification.updated_at);
-            }
+            // Still pending and PR activity bumped the notification — suppress.
+            // This is the intended behavior: the review request has already been
+            // emitted; re-emitting on every commit/comment would be noise (#335).
+            log(`Skipping ${notification.id}: review request already emitted and still pending (PR activity only)`);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
             continue;
           }
 
@@ -261,7 +244,7 @@ async function runPollLoop(
           const reviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
           if (reviewEvent) {
             process.stdout.write(JSON.stringify(reviewEvent) + "\n");
-            state = addActiveReviewRequest(state, notification.id, notification.updated_at);
+            state = addActiveReviewRequest(state, notification.id);
             latestProcessedByThread.set(notification.id, notification.updated_at);
           }
           continue;
