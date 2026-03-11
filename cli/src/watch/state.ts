@@ -147,13 +147,13 @@ function parseNotificationsPollState(
   if (raw === null || raw === undefined) return undefined;
   if (typeof raw !== "object" || Array.isArray(raw)) return undefined;
 
-  const result: Record<string, NotificationsPollState> = {};
+  const result: Record<string, NotificationsPollState> = Object.create(null);
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (typeof key !== "string" || typeof value !== "object" || value === null || Array.isArray(value)) {
       continue;
     }
     const entry = value as Record<string, unknown>;
-    const pollState: NotificationsPollState = {};
+    const pollState: NotificationsPollState = Object.create(null);
     if (typeof entry.lastModified === "string" && entry.lastModified) {
       pollState.lastModified = entry.lastModified;
     }
