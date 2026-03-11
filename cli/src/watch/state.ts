@@ -8,6 +8,7 @@ const MAX_PROCESSED_IDS = 200;
 export interface WatchState {
   lastChecked: string;           // ISO 8601 timestamp
   processedThreadIds: string[];  // rolling window of thread IDs already handled
+  activeReviewRequests?: string[]; // thread IDs with an in-flight review-request event emitted
 }
 
 export interface LoadStateResult {
@@ -106,10 +107,19 @@ export async function loadStateWithStatus(filePath: string): Promise<LoadStateRe
     }
 
     const processedThreadIds = parsed.processedThreadIds.filter((id): id is string => typeof id === "string");
+
+    // activeReviewRequests is optional and backward-compatible — load when present and valid
+    const activeReviewRequests = Array.isArray(parsed.activeReviewRequests)
+      ? (parsed.activeReviewRequests as unknown[]).filter((id): id is string => typeof id === "string")
+      : undefined;
+
     return {
       state: {
         lastChecked: parsed.lastChecked,
         processedThreadIds,
+        ...(activeReviewRequests !== undefined && activeReviewRequests.length > 0
+          ? { activeReviewRequests }
+          : {}),
       },
       degraded: false,
     };
@@ -133,6 +143,9 @@ export async function saveState(filePath: string, state: WatchState): Promise<vo
   const trimmed: WatchState = {
     lastChecked: state.lastChecked,
     processedThreadIds: state.processedThreadIds.slice(-MAX_PROCESSED_IDS),
+    ...(state.activeReviewRequests && state.activeReviewRequests.length > 0
+      ? { activeReviewRequests: state.activeReviewRequests }
+      : {}),
   };
 
   try {
@@ -155,6 +168,28 @@ export function addProcessedId(state: WatchState, threadId: string): WatchState 
     : [...state.processedThreadIds, threadId].slice(-MAX_PROCESSED_IDS);
 
   return { ...state, processedThreadIds: ids };
+}
+
+/**
+ * Record that a review-request event has been emitted for the given thread.
+ * The thread is tracked until the review is submitted or the request is withdrawn.
+ */
+export function addActiveReviewRequest(state: WatchState, threadId: string): WatchState {
+  const existing = state.activeReviewRequests ?? [];
+  if (existing.includes(threadId)) return state;
+  return { ...state, activeReviewRequests: [...existing, threadId] };
+}
+
+/**
+ * Remove a thread from the active review-requests set once the request is
+ * fulfilled or withdrawn.
+ */
+export function removeActiveReviewRequest(state: WatchState, threadId: string): WatchState {
+  const filtered = (state.activeReviewRequests ?? []).filter((id) => id !== threadId);
+  return {
+    ...state,
+    activeReviewRequests: filtered.length > 0 ? filtered : undefined,
+  };
 }
 
 function defaultState(): WatchState {

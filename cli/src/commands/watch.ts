@@ -12,7 +12,7 @@ import {
   isAgentMentioned,
   parseSubjectNumber,
 } from "../github/notifications.js";
-import { loadState, saveState, mergeAckJournal, addProcessedId, buildLatestProcessedByThread } from "../watch/state.js";
+import { loadState, saveState, mergeAckJournal, addProcessedId, addActiveReviewRequest, removeActiveReviewRequest, buildLatestProcessedByThread } from "../watch/state.js";
 
 function log(message: string): void {
   process.stderr.write(`[watch ${new Date().toISOString()}] ${message}\n`);
@@ -171,6 +171,82 @@ async function runPollLoop(
         // is recognized as a distinct event (thread IDs are reused by GitHub)
         const processedKey = `${notification.id}:${notification.updated_at}`;
         const previousProcessedAt = latestProcessedByThread.get(notification.id);
+
+        // -- Review-request shortcircuit --
+        // Handled before the general processedKey check because review-request
+        // threads use a stable per-thread cursor (activeReviewRequests) rather
+        // than threadId:updated_at. PR activity (new commits, comments) bumps
+        // updated_at, which would otherwise create a fresh processedKey and
+        // re-emit the same request — the core bug #335 targets.
+        if (notification.reason === "review_requested") {
+          if (notification.subject.type !== "PullRequest") {
+            log(`Skipping ${notification.id}: review_requested on non-PR subject, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+          const pullNumber = parseSubjectNumber(notification.subject.url);
+          if (pullNumber === undefined) {
+            log(`Skipping ${notification.id}: cannot parse PR number from subject URL, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+          const [repoOwner, repoName] = repo.split("/");
+
+          if (state.activeReviewRequests?.includes(notification.id)) {
+            // Already emitted once — verify the request is still open.
+            // If GitHub says pending=true this is just PR activity on an outstanding
+            // request; skip without re-emitting. If pending=false the review was
+            // submitted or request was withdrawn — clear the tracker.
+            const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
+            if (reviewState.transientFailure) {
+              log(`Skipping ${notification.id}: active review request state fetch failed transiently, will retry`);
+              continue;
+            }
+            if (reviewState.pending) {
+              log(`Skipping ${notification.id}: review request already emitted and still pending (PR activity only)`);
+              latestProcessedByThread.set(notification.id, notification.updated_at);
+              continue;
+            }
+            // Request fulfilled or withdrawn — clear from active tracker
+            log(`${notification.id}: review request fulfilled or withdrawn, clearing from activeReviewRequests`);
+            state = removeActiveReviewRequest(state, notification.id);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          // Not in activeReviewRequests — check if this specific update was already handled
+          if (state.processedThreadIds.includes(processedKey)) continue;
+
+          // New or renewed review request — verify then emit
+          const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
+          if (reviewState.transientFailure) {
+            log(`Skipping ${notification.id}: requested_reviewers fetch failed transiently, will retry`);
+            continue;
+          }
+          if (!reviewState.pending) {
+            if (reviewState.permanentFailure) {
+              log(`Skipping ${notification.id}: requested_reviewers fetch failed permanently, marking processed`);
+            } else {
+              log(`Skipping ${notification.id}: agent not in requested_reviewers (review submitted or request withdrawn), marking processed`);
+            }
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          // Agent is in requested_reviewers — emit event and record as active
+          const reviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
+          if (reviewEvent) {
+            process.stdout.write(JSON.stringify(reviewEvent) + "\n");
+            state = addActiveReviewRequest(state, notification.id);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+          }
+          continue;
+        }
+
         if (state.processedThreadIds.includes(processedKey)) continue;
 
         // Fetch the comment that triggered this notification
@@ -274,49 +350,7 @@ async function runPollLoop(
           }
         }
 
-        // -- Review-request verification (strict for reason="review_requested") --
-        // Uses GET /pulls/{n}/requested_reviewers — a state endpoint that GitHub
-        // maintains precisely: a reviewer is removed the moment they submit a review.
-        // This prevents stale thread updates (comments, new commits on a reviewed PR)
-        // from re-triggering the agent on a request that has already been fulfilled.
-        let reviewExtras: { trigger: string } | undefined;
-        if (notification.reason === "review_requested") {
-          if (notification.subject.type !== "PullRequest") {
-            // review_requested only applies to PRs; mark processed and move on
-            log(`Skipping ${notification.id}: review_requested on non-PR subject, marking processed`);
-            state = addProcessedId(state, processedKey);
-            latestProcessedByThread.set(notification.id, notification.updated_at);
-            continue;
-          }
-          const pullNumber = parseSubjectNumber(notification.subject.url);
-          if (pullNumber === undefined) {
-            log(`Skipping ${notification.id}: cannot parse PR number from subject URL, marking processed`);
-            state = addProcessedId(state, processedKey);
-            latestProcessedByThread.set(notification.id, notification.updated_at);
-            continue;
-          }
-          const [repoOwner, repoName] = repo.split("/");
-          const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
-          if (!reviewState.pending) {
-            if (reviewState.transientFailure) {
-              log(`Skipping ${notification.id}: requested_reviewers fetch failed transiently, will retry`);
-              continue;
-            }
-            if (reviewState.permanentFailure) {
-              log(`Skipping ${notification.id}: requested_reviewers fetch failed permanently, marking processed`);
-            } else {
-              log(`Skipping ${notification.id}: agent not in requested_reviewers (review submitted or request withdrawn), marking processed`);
-            }
-            state = addProcessedId(state, processedKey);
-            latestProcessedByThread.set(notification.id, notification.updated_at);
-            continue;
-          }
-          reviewExtras = { trigger: "review_requested" };
-        }
-
-        const event = reviewExtras
-          ? buildMentionEvent(notification, eventSource, agent, reviewExtras)
-          : buildMentionEvent(notification, eventSource, agent);
+        const event = buildMentionEvent(notification, eventSource, agent);
         if (!event) {
           // Can't parse — skip silently. Unparseable events reappear next poll
           // but are harmless since all=false naturally drops them once the

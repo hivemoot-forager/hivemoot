@@ -769,4 +769,79 @@ describe("watchCommand (review_requested reason)", () => {
       }),
     );
   });
+
+  it("adds thread to activeReviewRequests after first emission", async () => {
+    const notification = makePrNotification();
+    const event: MentionEvent = {
+      agent: "test-agent",
+      repo: "owner/repo",
+      number: 99,
+      type: "PullRequest",
+      title: "Add feature X",
+      author: "unknown",
+      body: "",
+      url: "",
+      threadId: "2001",
+      timestamp: "2026-03-10T10:00:00.000Z",
+      trigger: "review_requested",
+    };
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
+    mockedBuildEvent.mockReturnValue(event);
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        activeReviewRequests: ["2001"],
+      }),
+    );
+    // processedThreadIds must NOT contain this thread — active review requests are tracked separately
+    const savedState = (mockedSaveState.mock.calls[0] as [string, WatchState])[1];
+    expect(savedState.processedThreadIds).not.toContain("2001:2026-03-10T10:00:00.000Z");
+  });
+
+  it("skips re-emission when thread is already in activeReviewRequests and still pending", async () => {
+    const notification = makePrNotification({ updated_at: "2026-03-10T12:00:00.000Z" });
+
+    mockedLoadState.mockResolvedValue(defaultState({
+      activeReviewRequests: ["2001"],
+    }));
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    // Should NOT re-emit the event
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    // Should NOT add to processedThreadIds
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        activeReviewRequests: ["2001"],
+      }),
+    );
+  });
+
+  it("clears activeReviewRequests entry when review is no longer pending", async () => {
+    const notification = makePrNotification({ updated_at: "2026-03-10T14:00:00.000Z" });
+
+    mockedLoadState.mockResolvedValue(defaultState({
+      activeReviewRequests: ["2001"],
+    }));
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: false, permanentFailure: false, transientFailure: false });
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedBuildEvent).not.toHaveBeenCalled();
+    const savedState = (mockedSaveState.mock.calls[0] as [string, WatchState])[1];
+    // Thread should be removed from activeReviewRequests
+    expect(savedState.activeReviewRequests ?? []).not.toContain("2001");
+    // Terminal state should be marked in processedThreadIds
+    expect(savedState.processedThreadIds).toContain("2001:2026-03-10T14:00:00.000Z");
+  });
 });

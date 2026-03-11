@@ -375,8 +375,6 @@ export async function fetchSubjectBodyResult(subjectUrl: string): Promise<FetchD
 export interface ReviewRequestState {
   /** Is the agent currently in the PR's requested_reviewers list? */
   pending: boolean;
-  /** GitHub login of who requested the review, when identifiable. */
-  requestedBy?: string;
   /** True when the GitHub API returned a permanent error (403/404). */
   permanentFailure: boolean;
   /** True when the fetch failed transiently (network error, rate-limit, etc.) — caller should retry next poll. */
@@ -431,7 +429,7 @@ export function buildMentionEvent(
   notification: RawNotification,
   comment: CommentDetail | null,
   agent: string,
-  extras?: { trigger?: string; requester?: string },
+  extras?: { trigger?: string },
 ): MentionEvent | null {
   const number = parseSubjectNumber(notification.subject.url);
   if (number === undefined) return null;
@@ -449,6 +447,5 @@ export function buildMentionEvent(
     timestamp: notification.updated_at,
   };
   if (extras?.trigger !== undefined) event.trigger = extras.trigger;
-  if (extras?.requester !== undefined) event.requester = extras.requester;
   return event;
 }

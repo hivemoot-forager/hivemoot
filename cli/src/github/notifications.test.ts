@@ -629,23 +629,21 @@ describe("buildMentionEvent()", () => {
     expect(event!.number).toBe(99);
   });
 
-  it("includes trigger and requester from extras when provided", () => {
+  it("includes trigger from extras when provided", () => {
     const event = buildMentionEvent(
       baseNotification,
       baseComment,
       "hivemoot-worker",
-      { trigger: "review_requested", requester: "project-lead" },
+      { trigger: "review_requested" },
     );
 
     expect(event!.trigger).toBe("review_requested");
-    expect(event!.requester).toBe("project-lead");
   });
 
-  it("omits trigger and requester when extras is not provided", () => {
+  it("omits trigger when extras is not provided", () => {
     const event = buildMentionEvent(baseNotification, baseComment, "hivemoot-worker");
 
     expect(event).not.toHaveProperty("trigger");
-    expect(event).not.toHaveProperty("requester");
   });
 });
 
