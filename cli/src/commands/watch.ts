@@ -194,26 +194,46 @@ async function runPollLoop(
           }
           const [repoOwner, repoName] = repo.split("/");
 
-          if (state.activeReviewRequests?.includes(notification.id)) {
-            // Already emitted once — verify the request is still open.
-            // If GitHub says pending=true this is just PR activity on an outstanding
-            // request; skip without re-emitting. If pending=false the review was
-            // submitted or request was withdrawn — clear the tracker.
+          const emittedAt = state.activeReviewRequests?.[notification.id];
+          if (emittedAt !== undefined) {
+            // We previously emitted for this thread. Determine if the notification
+            // has advanced since emission — which may indicate a new review-request
+            // cycle (agent reviewed and was re-requested between polls).
             const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
             if (reviewState.transientFailure) {
               log(`Skipping ${notification.id}: active review request state fetch failed transiently, will retry`);
               continue;
             }
-            if (reviewState.pending) {
-              log(`Skipping ${notification.id}: review request already emitted and still pending (PR activity only)`);
+            if (!reviewState.pending) {
+              // Request fulfilled or withdrawn — clear from active tracker
+              log(`${notification.id}: review request fulfilled or withdrawn, clearing from activeReviewRequests`);
+              state = removeActiveReviewRequest(state, notification.id);
+              state = addProcessedId(state, processedKey);
               latestProcessedByThread.set(notification.id, notification.updated_at);
               continue;
             }
-            // Request fulfilled or withdrawn — clear from active tracker
-            log(`${notification.id}: review request fulfilled or withdrawn, clearing from activeReviewRequests`);
-            state = removeActiveReviewRequest(state, notification.id);
-            state = addProcessedId(state, processedKey);
-            latestProcessedByThread.set(notification.id, notification.updated_at);
+            // Still pending. Check if the notification advanced since we emitted.
+            // An advancement means either PR activity OR a new review-request cycle
+            // (the agent reviewed and was re-requested between polls). We cannot
+            // distinguish the two from the API alone, so we re-emit to avoid
+            // silently dropping a genuine re-request.
+            if (emittedAt !== "" && notification.updated_at <= emittedAt) {
+              // Notification unchanged since emission — same in-flight request.
+              log(`Skipping ${notification.id}: review request already emitted and unchanged since emission`);
+              latestProcessedByThread.set(notification.id, notification.updated_at);
+              continue;
+            }
+            // Notification advanced (or emittedAt is legacy sentinel "").
+            // Re-emit and update the stored emittedAt so future polls compare
+            // against this new baseline.
+            log(`${notification.id}: review request notification advanced (${emittedAt || "legacy"} → ${notification.updated_at}), re-emitting`);
+            const reReviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
+            if (reReviewEvent) {
+              process.stdout.write(JSON.stringify(reReviewEvent) + "\n");
+              state = removeActiveReviewRequest(state, notification.id);
+              state = addActiveReviewRequest(state, notification.id, notification.updated_at);
+              latestProcessedByThread.set(notification.id, notification.updated_at);
+            }
             continue;
           }
 
@@ -241,7 +261,7 @@ async function runPollLoop(
           const reviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
           if (reviewEvent) {
             process.stdout.write(JSON.stringify(reviewEvent) + "\n");
-            state = addActiveReviewRequest(state, notification.id);
+            state = addActiveReviewRequest(state, notification.id, notification.updated_at);
             latestProcessedByThread.set(notification.id, notification.updated_at);
           }
           continue;
