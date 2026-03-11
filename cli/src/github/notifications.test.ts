@@ -802,12 +802,19 @@ describe("fetchMentionNotificationsConditional()", () => {
     expect(result.notifications[0].id).toBe("101");
   });
 
-  it("returns empty notifications on body parse failure", async () => {
+  it("throws on body parse failure so caller does not advance lastModified", async () => {
     mockedGhWithHeaders.mockResolvedValue(makeHeadersResponse("not valid json"));
 
-    const result = await fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]);
+    await expect(
+      fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]),
+    ).rejects.toMatchObject({ code: "GH_ERROR" });
+  });
 
-    expect(result.notModified).toBe(false);
-    expect(result.notifications).toHaveLength(0);
+  it("throws when response body is valid JSON but not an array", async () => {
+    mockedGhWithHeaders.mockResolvedValue(makeHeadersResponse(JSON.stringify({ error: "oops" })));
+
+    await expect(
+      fetchMentionNotificationsConditional("hivemoot/colony", ["mention"]),
+    ).rejects.toMatchObject({ code: "GH_ERROR" });
   });
 });

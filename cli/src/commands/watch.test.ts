@@ -754,3 +754,39 @@ describe("watchCommand (continuous mode)", () => {
     await watchPromise;
   });
 });
+
+describe("watchCommand (parse-failure safety)", () => {
+  it("does not advance lastModified or lastChecked when fetch throws a parse error", async () => {
+    // Set up persisted state with a known lastModified
+    const priorLastModified = "Mon, 01 Jan 2026 10:00:00 GMT";
+    const priorLastChecked = "2026-01-01T10:00:00.000Z";
+    mockedLoadState.mockResolvedValue(defaultState({
+      lastChecked: priorLastChecked,
+      notificationsPollState: {
+        "owner/repo": { lastModified: priorLastModified },
+      },
+    }));
+
+    // Simulate a parse error (GH_ERROR thrown from fetchMentionNotificationsConditional)
+    mockedFetchMentions.mockRejectedValue(
+      new CliError("Failed to parse notification response body: Unexpected token", "GH_ERROR", 1),
+    );
+
+    // Run once — should not propagate (once=true means it does propagate, so skip --once)
+    // In continuous mode, poll errors are logged and retried; state must not be advanced.
+    // We cannot run the full loop, so test --once propagation to verify no state save occurred.
+    await expect(watchCommand({ repo: "owner/repo", once: true })).rejects.toMatchObject({
+      code: "GH_ERROR",
+    });
+
+    // saveState must not have been called — lastModified and lastChecked must not advance
+    const savedCalls = mockedSaveState.mock.calls;
+    for (const [, savedState] of savedCalls) {
+      expect(savedState.lastChecked).toBe(priorLastChecked);
+      const repoState = (savedState as WatchState).notificationsPollState?.["owner/repo"];
+      if (repoState) {
+        expect(repoState.lastModified).toBe(priorLastModified);
+      }
+    }
+  });
+});

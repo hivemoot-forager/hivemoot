@@ -435,14 +435,27 @@ export async function fetchMentionNotificationsConditional(
 
   const newLastModified = headers["last-modified"] ?? undefined;
 
-  let notifications: RawNotification[] = [];
+  let notifications: RawNotification[];
   try {
     const parsed: unknown = JSON.parse(body);
-    if (Array.isArray(parsed)) {
-      notifications = parsed as RawNotification[];
+    if (!Array.isArray(parsed)) {
+      throw new CliError(
+        `Unexpected notification response shape (expected array, got ${typeof parsed})`,
+        "GH_ERROR",
+        1,
+      );
     }
-  } catch {
-    // body parse failure: return empty list, caller will retry next poll
+    notifications = parsed as RawNotification[];
+  } catch (err) {
+    // Treat parse/shape failures as transient errors — throw so the watch loop
+    // does not advance lastModified or lastChecked, ensuring a retry on the
+    // next cycle fetches a fresh 200 response with the same notifications.
+    if (err instanceof CliError) throw err;
+    throw new CliError(
+      `Failed to parse notification response body: ${err instanceof Error ? err.message : String(err)}`,
+      "GH_ERROR",
+      1,
+    );
   }
 
   const filtered = notifications.filter((n) => {
