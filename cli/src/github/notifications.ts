@@ -384,6 +384,8 @@ export interface ReviewRequestState {
 export interface ReviewRequestEventResult {
   /** The integer ID of the most recent review_requested event for this agent, or null if none found. */
   eventId: number | null;
+  /** The login of the user who requested the review (actor.login on the timeline event). */
+  requester: string | null;
   /** True when the GitHub API returned a permanent error (403/404). */
   permanentFailure: boolean;
   /** True when the fetch failed transiently — caller should retry next poll. */
@@ -411,20 +413,26 @@ export async function fetchLatestReviewRequestEventId(
       "api",
       `/repos/${owner}/${repo}/issues/${pullNumber}/events?per_page=100`,
       "--jq",
-      `[.[] | select(.event == "review_requested" and (.requested_reviewer.login // "" | ascii_downcase) == "${agent.toLowerCase()}")] | sort_by(.id) | last | .id`,
+      `[.[] | select(.event == "review_requested" and (.requested_reviewer.login // "" | ascii_downcase) == "${agent.toLowerCase()}")] | sort_by(.id) | last | {id: .id, requester: .actor.login}`,
     ]);
     const trimmed = raw.trim();
     if (!trimmed || trimmed === "null") {
-      return { eventId: null, permanentFailure: false, transientFailure: false };
+      return { eventId: null, requester: null, permanentFailure: false, transientFailure: false };
     }
-    const eventId = parseInt(trimmed, 10);
-    if (Number.isNaN(eventId)) {
-      return { eventId: null, permanentFailure: false, transientFailure: false };
+    let parsed: { id: number; requester: string | null };
+    try {
+      parsed = JSON.parse(trimmed) as { id: number; requester: string | null };
+    } catch {
+      return { eventId: null, requester: null, permanentFailure: false, transientFailure: false };
     }
-    return { eventId, permanentFailure: false, transientFailure: false };
+    const eventId = parsed.id;
+    if (typeof eventId !== "number" || Number.isNaN(eventId)) {
+      return { eventId: null, requester: null, permanentFailure: false, transientFailure: false };
+    }
+    return { eventId, requester: parsed.requester ?? null, permanentFailure: false, transientFailure: false };
   } catch (err) {
     const permanent = isPermanentFetchError(err);
-    return { eventId: null, permanentFailure: permanent, transientFailure: !permanent };
+    return { eventId: null, requester: null, permanentFailure: permanent, transientFailure: !permanent };
   }
 }
 
@@ -476,7 +484,7 @@ export function buildMentionEvent(
   notification: RawNotification,
   comment: CommentDetail | null,
   agent: string,
-  extras?: { trigger?: string },
+  extras?: { trigger?: string; requester?: string },
 ): MentionEvent | null {
   const number = parseSubjectNumber(notification.subject.url);
   if (number === undefined) return null;
@@ -494,5 +502,6 @@ export function buildMentionEvent(
     timestamp: notification.updated_at,
   };
   if (extras?.trigger !== undefined) event.trigger = extras.trigger;
+  if (extras?.requester !== undefined) event.requester = extras.requester;
   return event;
 }

@@ -645,6 +645,23 @@ describe("buildMentionEvent()", () => {
 
     expect(event).not.toHaveProperty("trigger");
   });
+
+  it("includes requester from extras when provided", () => {
+    const event = buildMentionEvent(
+      baseNotification,
+      baseComment,
+      "hivemoot-worker",
+      { trigger: "review_requested", requester: "pr-author" },
+    );
+
+    expect(event!.requester).toBe("pr-author");
+  });
+
+  it("omits requester when not in extras", () => {
+    const event = buildMentionEvent(baseNotification, baseComment, "hivemoot-worker", { trigger: "review_requested" });
+
+    expect(event).not.toHaveProperty("requester");
+  });
 });
 
 describe("isAgentMentioned()", () => {

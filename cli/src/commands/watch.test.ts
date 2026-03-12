@@ -116,7 +116,7 @@ beforeEach(() => {
   mockedSaveState.mockResolvedValue(undefined);
   mockedFetchMentions.mockResolvedValue([]);
   mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
-  mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 100, permanentFailure: false, transientFailure: false });
+  mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 100, requester: null, permanentFailure: false, transientFailure: false });
   mockedParseSubjectNumber.mockImplementation((url: string) => {
     const match = url.match(/\/(\d+)$/);
     return match ? Number(match[1]) : undefined;
@@ -684,13 +684,41 @@ describe("watchCommand (review_requested reason)", () => {
 
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
-    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 42, permanentFailure: false, transientFailure: false });
+    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 42, requester: null, permanentFailure: false, transientFailure: false });
     mockedBuildEvent.mockReturnValue(event);
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
     expect(mockedFetchReviewRequestState).toHaveBeenCalledWith("owner", "repo", 99, "test-agent");
     expect(mockedBuildEvent).toHaveBeenCalledWith(notification, null, "test-agent", { trigger: "review_requested" });
+    expect(stdoutSpy).toHaveBeenCalledWith(JSON.stringify(event) + "\n");
+  });
+
+  it("includes requester in event extras when fetchLatestReviewRequestEventId returns a requester", async () => {
+    const notification = makePrNotification();
+    const event: MentionEvent = {
+      agent: "test-agent",
+      repo: "owner/repo",
+      number: 99,
+      type: "PullRequest",
+      title: "Add feature X",
+      author: "unknown",
+      body: "",
+      url: "",
+      threadId: "2001",
+      timestamp: "2026-03-10T10:00:00.000Z",
+      trigger: "review_requested",
+      requester: "pr-author",
+    };
+
+    mockedFetchMentions.mockResolvedValue([notification]);
+    mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
+    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 42, requester: "pr-author", permanentFailure: false, transientFailure: false });
+    mockedBuildEvent.mockReturnValue(event);
+
+    await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
+
+    expect(mockedBuildEvent).toHaveBeenCalledWith(notification, null, "test-agent", { trigger: "review_requested", requester: "pr-author" });
     expect(stdoutSpy).toHaveBeenCalledWith(JSON.stringify(event) + "\n");
   });
 
@@ -793,7 +821,7 @@ describe("watchCommand (review_requested reason)", () => {
 
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
-    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 9001, permanentFailure: false, transientFailure: false });
+    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 9001, requester: null, permanentFailure: false, transientFailure: false });
     mockedBuildEvent.mockReturnValue(event);
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
@@ -816,7 +844,7 @@ describe("watchCommand (review_requested reason)", () => {
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
     // Same event ID as stored — PR activity only, not a new review request
-    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 9001, permanentFailure: false, transientFailure: false });
+    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 9001, requester: null, permanentFailure: false, transientFailure: false });
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });
 
@@ -852,7 +880,7 @@ describe("watchCommand (review_requested reason)", () => {
     mockedFetchMentions.mockResolvedValue([notification]);
     mockedFetchReviewRequestState.mockResolvedValue({ pending: true, permanentFailure: false, transientFailure: false });
     // Higher event ID → genuine re-request after ack
-    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 9050, permanentFailure: false, transientFailure: false });
+    mockedFetchLatestReviewRequestEventId.mockResolvedValue({ eventId: 9050, requester: null, permanentFailure: false, transientFailure: false });
     mockedBuildEvent.mockReturnValue(reReviewEvent);
 
     await watchCommand({ repo: "owner/repo", once: true, reasons: "review_requested" });

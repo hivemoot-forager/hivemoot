@@ -249,6 +249,7 @@ export interface MentionEvent {
   threadId: string;   // notification thread ID
   timestamp: string;  // ISO 8601
   trigger?: string;   // notification reason, e.g. "mention" | "review_requested"
+  requester?: string; // login of the user who requested the review (review_requested events only)
 }
 
 // ── Error Types ────────────────────────────────────────────────────
