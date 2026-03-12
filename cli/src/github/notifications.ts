@@ -381,6 +381,53 @@ export interface ReviewRequestState {
   transientFailure: boolean;
 }
 
+export interface ReviewRequestEventResult {
+  /** The integer ID of the most recent review_requested event for this agent, or null if none found. */
+  eventId: number | null;
+  /** True when the GitHub API returned a permanent error (403/404). */
+  permanentFailure: boolean;
+  /** True when the fetch failed transiently — caller should retry next poll. */
+  transientFailure: boolean;
+}
+
+/**
+ * Fetch the integer ID of the most recent `review_requested` timeline event
+ * for `agent` on the given PR. Uses GET /issues/{n}/events (issue events API)
+ * which includes `review_requested` events with stable, monotonically increasing
+ * integer IDs. By tracking this ID in state, the watcher can distinguish
+ * "genuine re-request" (new event ID) from "PR activity on same request" (same ID).
+ *
+ * Returns `{ eventId: null }` when no matching event is found (request may have
+ * been made before the API window, or the endpoint is not yet populated).
+ */
+export async function fetchLatestReviewRequestEventId(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  agent: string,
+): Promise<ReviewRequestEventResult> {
+  try {
+    const raw = await gh([
+      "api",
+      `/repos/${owner}/${repo}/issues/${pullNumber}/events?per_page=100`,
+      "--jq",
+      `[.[] | select(.event == "review_requested" and (.requested_reviewer.login // "" | ascii_downcase) == "${agent.toLowerCase()}")] | sort_by(.id) | last | .id`,
+    ]);
+    const trimmed = raw.trim();
+    if (!trimmed || trimmed === "null") {
+      return { eventId: null, permanentFailure: false, transientFailure: false };
+    }
+    const eventId = parseInt(trimmed, 10);
+    if (Number.isNaN(eventId)) {
+      return { eventId: null, permanentFailure: false, transientFailure: false };
+    }
+    return { eventId, permanentFailure: false, transientFailure: false };
+  } catch (err) {
+    const permanent = isPermanentFetchError(err);
+    return { eventId: null, permanentFailure: permanent, transientFailure: !permanent };
+  }
+}
+
 /**
  * Check whether `agent` has a pending review request on a PR.
  * Uses GET /pulls/{pull_number}/requested_reviewers — a direct state query

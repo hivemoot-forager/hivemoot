@@ -9,18 +9,19 @@ export interface WatchState {
   lastChecked: string;           // ISO 8601 timestamp
   processedThreadIds: string[];  // rolling window of thread IDs already handled
   /**
-   * Tracks in-flight review-request events: a set of notification thread IDs
-   * for which a review_requested event has been emitted and the review is
-   * still outstanding. While a thread ID is here and requested_reviewers
-   * reports pending=true, the watcher suppresses re-emission so PR activity
-   * (new commits, comments) does not produce duplicate events.
+   * Tracks in-flight review-request events: maps notification thread ID to the
+   * integer ID of the last `review_requested` issue-event that was emitted for
+   * this agent. While a thread ID is here, new polls check whether the latest
+   * matching issue-event ID has advanced before re-emitting:
+   *   - same event ID  → PR activity only (new commit/comment) → suppress
+   *   - higher event ID → genuine re-request after review or ack → emit once
    *
-   * Known limitation: if an agent submits a review and the author re-requests
-   * within the same poll interval (before the watcher sees pending=false), the
-   * re-request may not be emitted. This is an accepted trade-off to avoid
-   * constant thread-activity noise, as required by #335.
+   * Using a stable, monotonically increasing event ID means the cursor is tied
+   * to the actual review-request action, not to the notification thread's
+   * `updated_at` (which changes for all PR activity). This eliminates both
+   * failure modes: thread-activity noise and dropped re-requests after ack.
    */
-  activeReviewRequests?: string[];
+  activeReviewRequests?: Record<string, number>;
 }
 
 export interface LoadStateResult {
@@ -121,23 +122,30 @@ export async function loadStateWithStatus(filePath: string): Promise<LoadStateRe
     const processedThreadIds = parsed.processedThreadIds.filter((id): id is string => typeof id === "string");
 
     // activeReviewRequests is optional and backward-compatible:
-    //   current format: string[] (notification IDs)
-    //   legacy format: Record<string, string> (notificationId → updatedAtAtEmission) — migrate to string[]
-    // Use `unknown` to handle both formats safely.
+    //   current format: Record<string, number> (threadId → lastEmittedReviewRequestEventId)
+    //   legacy format 1: string[] (notification IDs only — migrate to Record with sentinel 0)
+    //   legacy format 2: Record<string, string> (notificationId → updatedAtAtEmission) — migrate to Record with sentinel 0
+    // Use `unknown` to handle all formats safely.
     const rawActiveReviews: unknown = parsed.activeReviewRequests;
-    let activeReviewRequests: string[] | undefined;
+    let activeReviewRequests: Record<string, number> | undefined;
     if (Array.isArray(rawActiveReviews)) {
-      // Current format: string[]
+      // Legacy format 1: string[] — migrate to Record with sentinel value 0
+      // Sentinel 0 means "we emitted but don't know the event ID" — will re-emit
+      // on first new poll when the actual event ID is fetched and stored.
       const ids = (rawActiveReviews as unknown[]).filter(
         (id): id is string => typeof id === "string",
       );
-      activeReviewRequests = ids.length > 0 ? ids : undefined;
+      if (ids.length > 0) {
+        activeReviewRequests = Object.fromEntries(ids.map((id) => [id, 0]));
+      }
     } else if (rawActiveReviews !== null && typeof rawActiveReviews === "object") {
-      // Legacy format: Record<string, string> — extract just the keys
-      const ids = Object.keys(rawActiveReviews as Record<string, unknown>).filter(
-        (k) => typeof k === "string",
-      );
-      activeReviewRequests = ids.length > 0 ? ids : undefined;
+      // Could be: current format Record<string, number> or legacy Record<string, string>
+      const entries = Object.entries(rawActiveReviews as Record<string, unknown>)
+        .filter(([k]) => typeof k === "string")
+        .map(([k, v]): [string, number] => [k, typeof v === "number" ? v : 0]);
+      if (entries.length > 0) {
+        activeReviewRequests = Object.fromEntries(entries);
+      }
     }
 
     return {
@@ -170,7 +178,7 @@ export async function saveState(filePath: string, state: WatchState): Promise<vo
   const trimmed: WatchState = {
     lastChecked: state.lastChecked,
     processedThreadIds: state.processedThreadIds.slice(-MAX_PROCESSED_IDS),
-    ...(state.activeReviewRequests && state.activeReviewRequests.length > 0
+    ...(state.activeReviewRequests && Object.keys(state.activeReviewRequests).length > 0
       ? { activeReviewRequests: state.activeReviewRequests }
       : {}),
   };
@@ -198,30 +206,32 @@ export function addProcessedId(state: WatchState, threadId: string): WatchState 
 }
 
 /**
- * Record that a review-request event has been emitted for the given thread.
- * The thread ID is added to the activeReviewRequests set to suppress
- * re-emission from PR activity (new commits, comments) that bumps the
- * notification's updated_at while the review is still pending.
+ * Record that a review-request event has been emitted for the given thread,
+ * keyed by the integer ID of the `review_requested` issue event that triggered
+ * it. Subsequent polls compare the current latest event ID to this stored value
+ * to distinguish genuine re-requests (higher ID) from PR-activity noise (same ID).
+ *
+ * Pass `eventId = 0` when the event ID is unknown (migration from older state format).
  */
 export function addActiveReviewRequest(
   state: WatchState,
   threadId: string,
+  eventId: number,
 ): WatchState {
-  const existing = state.activeReviewRequests ?? [];
-  if (existing.includes(threadId)) return state;
-  return { ...state, activeReviewRequests: [...existing, threadId] };
+  const existing = state.activeReviewRequests ?? {};
+  return { ...state, activeReviewRequests: { ...existing, [threadId]: eventId } };
 }
 
 /**
- * Remove a thread from the active review-requests set once the request is
+ * Remove a thread from the active review-requests map once the request is
  * fulfilled or withdrawn.
  */
 export function removeActiveReviewRequest(state: WatchState, threadId: string): WatchState {
-  const existing = state.activeReviewRequests ?? [];
-  const updated = existing.filter((id) => id !== threadId);
+  const existing = state.activeReviewRequests ?? {};
+  const { [threadId]: _removed, ...remaining } = existing;
   return {
     ...state,
-    activeReviewRequests: updated.length > 0 ? updated : undefined,
+    activeReviewRequests: Object.keys(remaining).length > 0 ? remaining : undefined,
   };
 }
 

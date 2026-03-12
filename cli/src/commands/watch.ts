@@ -8,6 +8,7 @@ import {
   fetchRecentSubjectComments,
   fetchSubjectBodyResult,
   fetchReviewRequestState,
+  fetchLatestReviewRequestEventId,
   buildMentionEvent,
   isAgentMentioned,
   parseSubjectNumber,
@@ -194,36 +195,52 @@ async function runPollLoop(
           }
           const [repoOwner, repoName] = repo.split("/");
 
-          if (state.activeReviewRequests?.includes(notification.id)) {
-            // We previously emitted for this thread. Check if the request is
-            // still outstanding before deciding to suppress or clear.
-            // Suppression prevents PR activity (new commits, comments that bump
-            // updated_at) from generating duplicate review_requested events.
+          const storedEventId = state.activeReviewRequests?.[notification.id];
+          const isTracked = storedEventId !== undefined;
+
+          if (isTracked) {
+            // Previously emitted for this thread — check if request is still outstanding.
             const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
             if (reviewState.transientFailure) {
               log(`Skipping ${notification.id}: active review request state fetch failed transiently, will retry`);
               continue;
             }
             if (!reviewState.pending) {
-              // Request fulfilled or withdrawn — clear from active tracker
+              // Request fulfilled or withdrawn — remove from active tracker
               log(`${notification.id}: review request fulfilled or withdrawn, clearing from activeReviewRequests`);
               state = removeActiveReviewRequest(state, notification.id);
               state = addProcessedId(state, processedKey);
               latestProcessedByThread.set(notification.id, notification.updated_at);
               continue;
             }
-            // Still pending and PR activity bumped the notification — suppress.
-            // This is the intended behavior: the review request has already been
-            // emitted; re-emitting on every commit/comment would be noise (#335).
-            log(`Skipping ${notification.id}: review request already emitted and still pending (PR activity only)`);
-            latestProcessedByThread.set(notification.id, notification.updated_at);
+            // Still pending — check whether a new review_requested event appeared.
+            // This distinguishes genuine re-requests from PR activity noise.
+            const eventResult = await fetchLatestReviewRequestEventId(repoOwner, repoName, pullNumber, agent);
+            if (eventResult.transientFailure) {
+              log(`Skipping ${notification.id}: review event ID fetch failed transiently, will retry`);
+              continue;
+            }
+            if (eventResult.permanentFailure || eventResult.eventId === null || eventResult.eventId <= storedEventId) {
+              // Same event ID (or unknown) → plain PR activity or no events found → suppress
+              log(`Skipping ${notification.id}: review request already emitted and still pending (PR activity only, event ${eventResult.eventId ?? "unknown"} <= stored ${storedEventId})`);
+              latestProcessedByThread.set(notification.id, notification.updated_at);
+              continue;
+            }
+            // Higher event ID → genuine re-request after ack or review — emit again
+            log(`${notification.id}: new review_requested event (id=${eventResult.eventId} > stored=${storedEventId}), re-emitting`);
+            const reReviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
+            if (reReviewEvent) {
+              process.stdout.write(JSON.stringify(reReviewEvent) + "\n");
+              state = addActiveReviewRequest(state, notification.id, eventResult.eventId);
+              latestProcessedByThread.set(notification.id, notification.updated_at);
+            }
             continue;
           }
 
           // Not in activeReviewRequests — check if this specific update was already handled
           if (state.processedThreadIds.includes(processedKey)) continue;
 
-          // New or renewed review request — verify then emit
+          // New (untracked) review_requested notification — verify then emit
           const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
           if (reviewState.transientFailure) {
             log(`Skipping ${notification.id}: requested_reviewers fetch failed transiently, will retry`);
@@ -240,11 +257,18 @@ async function runPollLoop(
             continue;
           }
 
-          // Agent is in requested_reviewers — emit event and record as active
+          // Agent is in requested_reviewers — fetch the event ID, emit, and record as active
+          const eventResult = await fetchLatestReviewRequestEventId(repoOwner, repoName, pullNumber, agent);
+          if (eventResult.transientFailure) {
+            log(`Skipping ${notification.id}: review event ID fetch failed transiently, will retry`);
+            continue;
+          }
+          // eventId may be null if the events API doesn't have the event yet; use 0 as sentinel
+          const emittedEventId = eventResult.eventId ?? 0;
           const reviewEvent = buildMentionEvent(notification, null, agent, { trigger: "review_requested" });
           if (reviewEvent) {
             process.stdout.write(JSON.stringify(reviewEvent) + "\n");
-            state = addActiveReviewRequest(state, notification.id);
+            state = addActiveReviewRequest(state, notification.id, emittedEventId);
             latestProcessedByThread.set(notification.id, notification.updated_at);
           }
           continue;
