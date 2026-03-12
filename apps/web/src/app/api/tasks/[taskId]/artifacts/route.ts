@@ -16,20 +16,34 @@ const MAX_PAYLOAD_BYTES = 32 * 1024;
 const MAX_ARTIFACT_TITLE_CHARS = 200;
 const textEncoder = new TextEncoder();
 
-const VALID_ARTIFACT_TYPES = new Set<TaskArtifact["type"]>([
-  "pull_request",
-  "issue",
-  "issue_comment",
-  "commit",
-]);
+// Derives artifact type and number from the GitHub URL path. Returns null for
+// unrecognised URL patterns so unknown GitHub object types are rejected rather
+// than silently accepted with a caller-supplied type.
+function parseArtifactMetadata(
+  url: string,
+  repo: string,
+): { type: TaskArtifact["type"]; number?: number } | null {
+  const base = `https://github.com/${repo}/`;
+  if (!url.startsWith(base)) return null;
+  const path = url.slice(base.length);
 
-function isAllowedArtifactUrl(url: string, taskRepos: string[]): boolean {
-  const base = "https://github.com/";
-  if (!url.startsWith(base)) return false;
-  const afterBase = url.slice(base.length);
-  return taskRepos.some(
-    (repo) => afterBase === repo || afterBase.startsWith(repo + "/"),
-  );
+  // pull_request: /pull/{N}
+  const prMatch = /^pull\/(\d+)$/.exec(path);
+  if (prMatch) return { type: "pull_request", number: parseInt(prMatch[1], 10) };
+
+  // issue_comment: /issues/{N}#issuecomment-{M}
+  const commentMatch = /^issues\/\d+#issuecomment-(\d+)$/.exec(path);
+  if (commentMatch) return { type: "issue_comment", number: parseInt(commentMatch[1], 10) };
+
+  // issue: /issues/{N} (no fragment)
+  const issueMatch = /^issues\/(\d+)$/.exec(path);
+  if (issueMatch) return { type: "issue", number: parseInt(issueMatch[1], 10) };
+
+  // commit: /commit/{sha}
+  const commitMatch = /^commit\/[0-9a-f]{7,40}$/.exec(path);
+  if (commitMatch) return { type: "commit" };
+
+  return null;
 }
 
 // Returns a parsed artifact array on success, or an error string on failure.
@@ -48,34 +62,30 @@ function parseArtifacts(raw: unknown, taskRepos: string[]): TaskArtifact[] | str
 
     const obj = item as Record<string, unknown>;
 
-    if (!VALID_ARTIFACT_TYPES.has(obj.type as TaskArtifact["type"])) {
-      return `artifact type must be one of: ${[...VALID_ARTIFACT_TYPES].join(", ")}`;
-    }
-
     if (typeof obj.url !== "string" || !obj.url.trim()) {
       return "each artifact must have a url string";
     }
 
-    if (!isAllowedArtifactUrl(obj.url.trim(), taskRepos)) {
+    const url = obj.url.trim();
+
+    // Derive type and number from URL — caller-supplied type and number are ignored.
+    // This prevents mismatched type/URL pairs (e.g. type="pull_request" with a commit URL).
+    const matchedRepo = taskRepos.find((repo) => url.startsWith(`https://github.com/${repo}/`));
+    if (!matchedRepo) {
       return "artifact url must be a GitHub URL scoped to one of the task repos";
     }
 
-    if (
-      obj.number !== undefined
-      && (typeof obj.number !== "number" || !Number.isInteger(obj.number))
-    ) {
-      return "artifact number must be an integer";
+    const meta = parseArtifactMetadata(url, matchedRepo);
+    if (!meta) {
+      return "artifact url does not match a recognised GitHub object path (pull, issue, issue comment, or commit)";
     }
 
     if (obj.title !== undefined && typeof obj.title !== "string") {
       return "artifact title must be a string";
     }
 
-    const artifact: TaskArtifact = {
-      type: obj.type as TaskArtifact["type"],
-      url: obj.url.trim(),
-    };
-    if (typeof obj.number === "number") artifact.number = obj.number;
+    const artifact: TaskArtifact = { type: meta.type, url };
+    if (meta.number !== undefined) artifact.number = meta.number;
     if (typeof obj.title === "string") {
       artifact.title = obj.title.slice(0, MAX_ARTIFACT_TITLE_CHARS);
     }
