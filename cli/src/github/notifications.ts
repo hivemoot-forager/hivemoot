@@ -484,7 +484,7 @@ export function buildMentionEvent(
   notification: RawNotification,
   comment: CommentDetail | null,
   agent: string,
-  extras?: { trigger?: string; requester?: string },
+  extras?: { trigger?: string; requester?: string; reviewer?: string },
 ): MentionEvent | null {
   const number = parseSubjectNumber(notification.subject.url);
   if (number === undefined) return null;
@@ -503,5 +503,6 @@ export function buildMentionEvent(
   };
   if (extras?.trigger !== undefined) event.trigger = extras.trigger;
   if (extras?.requester !== undefined) event.requester = extras.requester;
+  if (extras?.reviewer !== undefined) event.reviewer = extras.reviewer;
   return event;
 }

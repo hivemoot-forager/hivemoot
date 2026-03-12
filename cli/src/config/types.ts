@@ -250,6 +250,7 @@ export interface MentionEvent {
   timestamp: string;  // ISO 8601
   trigger?: string;   // notification reason, e.g. "mention" | "review_requested"
   requester?: string; // login of the user who requested the review (review_requested events only)
+  reviewer?: string;  // login of the reviewer (review_requested events only)
 }
 
 // ── Error Types ────────────────────────────────────────────────────

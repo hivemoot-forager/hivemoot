@@ -228,7 +228,7 @@ async function runPollLoop(
             }
             // Higher event ID → genuine re-request after ack or review — emit again
             log(`${notification.id}: new review_requested event (id=${eventResult.eventId} > stored=${storedEventId}), re-emitting`);
-            const reReviewExtras: { trigger: string; requester?: string } = { trigger: "review_requested" };
+            const reReviewExtras: { trigger: string; requester?: string; reviewer?: string } = { trigger: "review_requested", reviewer: agent };
             if (eventResult.requester) reReviewExtras.requester = eventResult.requester;
             const reReviewEvent = buildMentionEvent(notification, null, agent, reReviewExtras);
             if (reReviewEvent) {
@@ -267,7 +267,7 @@ async function runPollLoop(
           }
           // eventId may be null if the events API doesn't have the event yet; use 0 as sentinel
           const emittedEventId = eventResult.eventId ?? 0;
-          const reviewExtras: { trigger: string; requester?: string } = { trigger: "review_requested" };
+          const reviewExtras: { trigger: string; requester?: string; reviewer?: string } = { trigger: "review_requested", reviewer: agent };
           if (eventResult.requester) reviewExtras.requester = eventResult.requester;
           const reviewEvent = buildMentionEvent(notification, null, agent, reviewExtras);
           if (reviewEvent) {
