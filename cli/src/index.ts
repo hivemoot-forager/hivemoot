@@ -10,6 +10,7 @@ import { prSnapshotCommand } from "./commands/pr-snapshot.js";
 import { prPreflightCommand } from "./commands/pr-preflight.js";
 import { issueVoteCommand } from "./commands/issue-vote.js";
 import { issuePostCommentCommand } from "./commands/issue-post-comment.js";
+import { issueSnapshotCommand } from "./commands/issue-snapshot.js";
 import { notificationsPullCommand } from "./commands/notifications-pull.js";
 import { CliError } from "./config/types.js";
 import { setGhToken } from "./github/client.js";
@@ -134,6 +135,25 @@ Examples:
 const issueProgram = program
   .command("issue")
   .description("Issue workflow helpers for autonomous agents");
+
+issueProgram
+  .command("snapshot")
+  .description("Emit a canonical issue context payload")
+  .argument("<issue>", "Issue number")
+  .option("--repo <owner/repo>", "Target repository (default: detect from git)")
+  .option("--json", "Output as JSON")
+  .addHelpText(
+    "after",
+    `
+
+Examples:
+  $ hivemoot issue snapshot 42 --repo hivemoot/hivemoot --json
+    Output schemaVersioned issue context for automation
+
+  $ hivemoot issue snapshot 42
+    Print issue summary in readable form`,
+  )
+  .action(issueSnapshotCommand);
 
 issueProgram
   .command("vote")
