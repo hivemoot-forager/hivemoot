@@ -386,6 +386,37 @@ describe("watchCommand (--once mode)", () => {
     );
   });
 
+  it("does not advance lastModified when a notification has a transient fetch failure", async () => {
+    // Persisted state has a known lastModified; the current 200 response returns a newer one.
+    const priorLastModified = "Mon, 01 Jan 2026 10:00:00 GMT";
+    const newLastModified = "Mon, 10 Mar 2026 12:00:00 GMT";
+    mockedLoadState.mockResolvedValue(defaultState({
+      notificationsPollState: { "owner/repo": { lastModified: priorLastModified } },
+    }));
+
+    const notification = makeNotification();
+    mockedFetchMentions.mockResolvedValue(
+      makeConditionalResult([notification], { lastModified: newLastModified }),
+    );
+    // Transient failure: comment fetch returns null for a notification that has a URL
+    mockedFetchComment.mockResolvedValue(null);
+
+    await watchCommand({ repo: "owner/repo", once: true });
+
+    // lastModified must NOT advance — next poll retries from the same cursor
+    // rather than taking the 304 fast path and silently losing this notification.
+    expect(mockedSaveState).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        notificationsPollState: expect.objectContaining({
+          "owner/repo": expect.not.objectContaining({
+            lastModified: newLastModified,
+          }),
+        }),
+      }),
+    );
+  });
+
   it("rejects invalid --repo format", async () => {
     await expect(
       watchCommand({ repo: "invalid-repo-format" }),

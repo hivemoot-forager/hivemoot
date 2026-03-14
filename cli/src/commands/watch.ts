@@ -186,25 +186,35 @@ async function runPollLoop(
         continue;
       }
 
-      // Update per-repo poll state with the latest Last-Modified and X-Poll-Interval
-      const newRepoPollState: NotificationsPollState = {
-        ...(conditionalResult.lastModified ? { lastModified: conditionalResult.lastModified } : repoPollState?.lastModified ? { lastModified: repoPollState.lastModified } : {}),
-        ...(conditionalResult.pollInterval ? { pollInterval: conditionalResult.pollInterval } : repoPollState?.pollInterval ? { pollInterval: repoPollState.pollInterval } : {}),
-      };
+      // Update pollInterval immediately so the new minimum sleep takes effect
+      // this cycle. lastModified is held pending until all notifications in this
+      // batch are processed — if any have transient failures we keep the old
+      // cursor so the next poll fetches a fresh 200 and retries them.
+      const newPollInterval = conditionalResult.pollInterval ?? repoPollState?.pollInterval;
+      const pendingLastModified = conditionalResult.lastModified ?? repoPollState?.lastModified;
+
       state = {
         ...state,
         notificationsPollState: {
           ...state.notificationsPollState,
-          [repo]: newRepoPollState,
+          [repo]: {
+            ...(repoPollState?.lastModified ? { lastModified: repoPollState.lastModified } : {}),
+            ...(newPollInterval ? { pollInterval: newPollInterval } : {}),
+          },
         },
       };
 
       // 200: recompute sleep from the current response's X-Poll-Interval so the new
       // minimum takes effect immediately (not one cycle late).
-      const newPollMs = newRepoPollState.pollInterval ? newRepoPollState.pollInterval * 1000 : 0;
+      const newPollMs = newPollInterval ? newPollInterval * 1000 : 0;
       effectiveSleepMs = Math.max(intervalMs, newPollMs);
 
       const notifications = conditionalResult.notifications;
+
+      // Track whether any notification in this batch had a transient fetch failure.
+      // If true, we don't advance lastModified so the next poll retries from the
+      // same conditional cursor rather than taking the 304 fast path.
+      let anyTransientFailure = false;
 
       for (const notification of notifications) {
         if (signal.aborted) break;
@@ -226,6 +236,7 @@ async function runPollLoop(
         // buildMentionEvent which handles null comments gracefully.
         if (comment === null && notification.subject.latest_comment_url) {
           log(`Skipping ${notification.id}: comment fetch failed, will retry`);
+          anyTransientFailure = true;
           continue;
         }
 
@@ -260,6 +271,7 @@ async function runPollLoop(
                   latestProcessedByThread.set(notification.id, notification.updated_at);
                 } else {
                   log(`Skipping ${notification.id}: thread comment scan failed, will retry`);
+                  anyTransientFailure = true;
                 }
                 continue;
               } else {
@@ -294,6 +306,7 @@ async function runPollLoop(
                   latestProcessedByThread.set(notification.id, notification.updated_at);
                 } else {
                   log(`Skipping ${notification.id}: comment scan failed (no latest_comment_url), will retry`);
+                  anyTransientFailure = true;
                 }
                 continue;
               } else if (subject.detail === null) {
@@ -304,6 +317,7 @@ async function runPollLoop(
                   latestProcessedByThread.set(notification.id, notification.updated_at);
                 } else {
                   log(`Skipping ${notification.id}: subject fetch failed and no matching comments, will retry`);
+                  anyTransientFailure = true;
                 }
                 continue;
               } else {
@@ -329,6 +343,23 @@ async function runPollLoop(
         // after successfully processing the event, which marks it read on GitHub
         // and records the key in the ack journal.
         process.stdout.write(JSON.stringify(event) + "\n");
+      }
+
+      // Advance lastModified only when all notifications in this batch were
+      // processed or definitively skipped. If any transient failure occurred,
+      // keep the old cursor so the next poll retries from the same position —
+      // even if GitHub would otherwise serve a 304 Not Modified.
+      if (!anyTransientFailure && pendingLastModified) {
+        state = {
+          ...state,
+          notificationsPollState: {
+            ...state.notificationsPollState,
+            [repo]: {
+              ...state.notificationsPollState?.[repo],
+              lastModified: pendingLastModified,
+            },
+          },
+        };
       }
 
       state = { ...state, lastChecked: fetchTime };

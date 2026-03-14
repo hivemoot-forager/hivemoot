@@ -402,30 +402,36 @@ export interface ConditionalFetchResult {
  * The `X-Poll-Interval` header value (when present) is returned so callers can
  * adjust their sleep interval to match GitHub's recommended minimum.
  *
- * Uses a single non-paginated request with per_page=100, which covers the
- * practical range of unread notifications for any repository. If >100 unread
- * notifications exist (extremely rare), the surplus is processed on the next
- * poll cycle.
+ * Uses a two-call design:
+ * 1. Conditional probe with `If-Modified-Since` (no pagination) to get 304/200
+ *    and extract response metadata (Last-Modified, X-Poll-Interval) from headers.
+ *    Using -i here is reliable because we do not need to paginate this probe.
+ * 2. If 200: full paginated fetch with `--paginate --slurp` to retrieve all pages,
+ *    avoiding silent data loss when >100 unread notifications exist.
+ *
+ * This approach avoids the `--paginate -i` conflict where Link headers appear
+ * only on the first page, making it impossible to read conditional headers from
+ * subsequent pages.
  */
 export async function fetchMentionNotificationsConditional(
   repo: string,
   reasons: string[],
   lastModified?: string,
 ): Promise<ConditionalFetchResult> {
-  const params = new URLSearchParams({ all: "false", per_page: "100" });
-  const args = ["api", "-i"];
+  // Step 1: Conditional probe — get 304/200 and extract response metadata.
+  const probeArgs = ["api", "-i"];
   if (lastModified) {
-    args.push("-H", `If-Modified-Since: ${lastModified}`);
+    probeArgs.push("-H", `If-Modified-Since: ${lastModified}`);
   }
-  args.push(`/repos/${repo}/notifications?${params}`);
+  probeArgs.push(`/repos/${repo}/notifications?all=false`);
 
-  const result = await ghWithHeaders(args);
+  const probeResult = await ghWithHeaders(probeArgs);
 
-  if (result.notModified) {
+  if (probeResult.notModified) {
     return { notModified: true, notifications: [] };
   }
 
-  const { headers, body } = result;
+  const { headers } = probeResult;
 
   const pollIntervalRaw = headers["x-poll-interval"];
   const pollIntervalSeconds = pollIntervalRaw ? parseInt(pollIntervalRaw, 10) : NaN;
@@ -435,17 +441,28 @@ export async function fetchMentionNotificationsConditional(
 
   const newLastModified = headers["last-modified"] ?? undefined;
 
+  // Step 2: Fetch all pages. No If-Modified-Since here — content is known to have
+  // changed. --paginate --slurp fetches all Link pages so >100 unread notifications
+  // are never silently dropped.
+  const raw = await gh([
+    "api",
+    "--paginate",
+    "--slurp",
+    `/repos/${repo}/notifications?all=false`,
+  ]);
+
   let notifications: RawNotification[];
   try {
-    const parsed: unknown = JSON.parse(body);
-    if (!Array.isArray(parsed)) {
+    const pages: unknown = JSON.parse(raw);
+    if (!Array.isArray(pages)) {
       throw new CliError(
-        `Unexpected notification response shape (expected array, got ${typeof parsed})`,
+        `Unexpected notification response shape (expected array, got ${typeof pages})`,
         "GH_ERROR",
         1,
       );
     }
-    notifications = parsed as RawNotification[];
+    // --paginate --slurp produces an array of page arrays
+    notifications = (pages as RawNotification[][]).flat();
   } catch (err) {
     // Treat parse/shape failures as transient errors — throw so the watch loop
     // does not advance lastModified or lastChecked, ensuring a retry on the
