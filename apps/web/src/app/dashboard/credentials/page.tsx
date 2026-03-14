@@ -19,6 +19,7 @@ export default async function CredentialsPage() {
   const token = cookieStore.get(SETUP_SESSION_COOKIE)?.value;
 
   let fresh = false;
+  let reAuthUrl = "/api/auth/github/start-discover?force=1&next=/dashboard/credentials";
   if (token) {
     const env = validateEnv();
     if (env.ok && env.config.redisRestUrl && env.config.redisRestToken) {
@@ -27,9 +28,14 @@ export default async function CredentialsPage() {
         const session = await getSetupSession(token, redis);
         if (session) {
           fresh = isSessionFresh(session);
+          // Route re-auth through /start with the known installationId so the
+          // callback skips discovery and stays pinned to the current installation.
+          // Using start-discover would pick installations[0], silently switching
+          // multi-install users to the wrong installation.
+          reAuthUrl = `/api/auth/github/start?installation_id=${encodeURIComponent(session.installationId)}&next=/dashboard/credentials`;
         }
       } catch {
-        // Treat as stale on Redis error.
+        // Treat as stale on Redis error. Fall back to the discovery path.
       }
     }
   }
@@ -52,7 +58,7 @@ export default async function CredentialsPage() {
             (within the last 15 minutes) for security.
           </p>
           <a
-            href="/api/auth/github/start-discover?force=1&next=/dashboard/credentials"
+            href={reAuthUrl}
             className="inline-flex items-center gap-2 rounded-md bg-amber-500 px-4 py-2 text-sm font-medium text-black hover:bg-amber-400 transition-colors"
           >
             Re-authenticate with GitHub
