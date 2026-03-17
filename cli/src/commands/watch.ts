@@ -3,7 +3,7 @@ import { CliError } from "../config/types.js";
 import { fetchCurrentUser } from "../github/user.js";
 import type { CommentDetail } from "../github/notifications.js";
 import {
-  fetchMentionNotifications,
+  fetchMentionNotificationsConditional,
   fetchCommentBody,
   fetchRecentSubjectComments,
   fetchSubjectBodyResult,
@@ -11,6 +11,7 @@ import {
   isAgentMentioned,
 } from "../github/notifications.js";
 import { loadState, saveState, mergeAckJournal, addProcessedId, buildLatestProcessedByThread } from "../watch/state.js";
+import type { NotificationsPollState } from "../watch/state.js";
 
 function log(message: string): void {
   process.stderr.write(`[watch ${new Date().toISOString()}] ${message}\n`);
@@ -117,7 +118,7 @@ export async function watchCommand(options: WatchOptions): Promise<void> {
     );
   }
 
-  log(`Starting watch: repo=${repo} agent=${agent} interval=${options.interval ?? 300}s reasons=${reasons.join(",")}`);
+  log(`Starting watch: repo=${repo} agent=${agent} min-interval=${options.interval ?? 300}s reasons=${reasons.join(",")}`);
 
   const abortController = new AbortController();
   let shutdownRequested = false;
@@ -157,10 +158,63 @@ async function runPollLoop(
     state = await mergeAckJournal(stateFile, state);
     const latestProcessedByThread = buildLatestProcessedByThread(state.processedThreadIds);
 
+    // Load per-repo poll state for conditional request headers
+    const repoPollState: NotificationsPollState | undefined = state.notificationsPollState?.[repo];
+
+    // Default sleep to the persisted interval (used on error/retry path and as fallback).
+    // Overwritten below when a 200 response arrives with a new X-Poll-Interval.
+    const persistedPollMs = repoPollState?.pollInterval ? repoPollState.pollInterval * 1000 : 0;
+    let effectiveSleepMs = Math.max(intervalMs, persistedPollMs);
+
     try {
       // Capture time before fetch (informational — no longer used as fetch cursor)
       const fetchTime = new Date().toISOString();
-      const notifications = await fetchMentionNotifications(repo, reasons);
+      const conditionalResult = await fetchMentionNotificationsConditional(
+        repo,
+        reasons,
+        repoPollState?.lastModified,
+      );
+
+      if (conditionalResult.notModified) {
+        log(`304 Not Modified — no new notifications, skipping processing`);
+        state = { ...state, lastChecked: fetchTime };
+        await saveState(stateFile, state);
+
+        if (once) break;
+        // 304: no new X-Poll-Interval from server — effectiveSleepMs already holds persisted interval
+        await sleep(effectiveSleepMs, signal);
+        continue;
+      }
+
+      // Update pollInterval immediately so the new minimum sleep takes effect
+      // this cycle. lastModified is held pending until all notifications in this
+      // batch are processed — if any have transient failures we keep the old
+      // cursor so the next poll fetches a fresh 200 and retries them.
+      const newPollInterval = conditionalResult.pollInterval ?? repoPollState?.pollInterval;
+      const pendingLastModified = conditionalResult.lastModified ?? repoPollState?.lastModified;
+
+      state = {
+        ...state,
+        notificationsPollState: {
+          ...state.notificationsPollState,
+          [repo]: {
+            ...(repoPollState?.lastModified ? { lastModified: repoPollState.lastModified } : {}),
+            ...(newPollInterval ? { pollInterval: newPollInterval } : {}),
+          },
+        },
+      };
+
+      // 200: recompute sleep from the current response's X-Poll-Interval so the new
+      // minimum takes effect immediately (not one cycle late).
+      const newPollMs = newPollInterval ? newPollInterval * 1000 : 0;
+      effectiveSleepMs = Math.max(intervalMs, newPollMs);
+
+      const notifications = conditionalResult.notifications;
+
+      // Track whether any notification in this batch had a transient fetch failure.
+      // If true, we don't advance lastModified so the next poll retries from the
+      // same conditional cursor rather than taking the 304 fast path.
+      let anyTransientFailure = false;
 
       for (const notification of notifications) {
         if (signal.aborted) break;
@@ -182,6 +236,7 @@ async function runPollLoop(
         // buildMentionEvent which handles null comments gracefully.
         if (comment === null && notification.subject.latest_comment_url) {
           log(`Skipping ${notification.id}: comment fetch failed, will retry`);
+          anyTransientFailure = true;
           continue;
         }
 
@@ -216,6 +271,7 @@ async function runPollLoop(
                   latestProcessedByThread.set(notification.id, notification.updated_at);
                 } else {
                   log(`Skipping ${notification.id}: thread comment scan failed, will retry`);
+                  anyTransientFailure = true;
                 }
                 continue;
               } else {
@@ -250,6 +306,7 @@ async function runPollLoop(
                   latestProcessedByThread.set(notification.id, notification.updated_at);
                 } else {
                   log(`Skipping ${notification.id}: comment scan failed (no latest_comment_url), will retry`);
+                  anyTransientFailure = true;
                 }
                 continue;
               } else if (subject.detail === null) {
@@ -260,6 +317,7 @@ async function runPollLoop(
                   latestProcessedByThread.set(notification.id, notification.updated_at);
                 } else {
                   log(`Skipping ${notification.id}: subject fetch failed and no matching comments, will retry`);
+                  anyTransientFailure = true;
                 }
                 continue;
               } else {
@@ -287,6 +345,23 @@ async function runPollLoop(
         process.stdout.write(JSON.stringify(event) + "\n");
       }
 
+      // Advance lastModified only when all notifications in this batch were
+      // processed or definitively skipped. If any transient failure occurred,
+      // keep the old cursor so the next poll retries from the same position —
+      // even if GitHub would otherwise serve a 304 Not Modified.
+      if (!anyTransientFailure && pendingLastModified) {
+        state = {
+          ...state,
+          notificationsPollState: {
+            ...state.notificationsPollState,
+            [repo]: {
+              ...state.notificationsPollState?.[repo],
+              lastModified: pendingLastModified,
+            },
+          },
+        };
+      }
+
       state = { ...state, lastChecked: fetchTime };
       await saveState(stateFile, state);
     } catch (err) {
@@ -303,6 +378,6 @@ async function runPollLoop(
 
     if (once) break;
 
-    await sleep(intervalMs, signal);
+    await sleep(effectiveSleepMs, signal);
   }
 }
