@@ -6,12 +6,23 @@ import {
   fetchMentionNotificationsConditional,
   fetchCommentBody,
   fetchRecentSubjectComments,
+  fetchLatestReviewRequestEvent,
+  fetchReviewRequestState,
   fetchSubjectBodyResult,
   buildMentionEvent,
   isAgentMentioned,
+  parseSubjectNumber,
 } from "../github/notifications.js";
-import { loadState, saveState, mergeAckJournal, addProcessedId, buildLatestProcessedByThread } from "../watch/state.js";
-import type { NotificationsPollState } from "../watch/state.js";
+import {
+  loadState,
+  saveState,
+  mergeAckJournal,
+  addProcessedId,
+  addReviewRequestId,
+  buildLatestProcessedByThread,
+  buildLatestReviewRequestByThread,
+  type NotificationsPollState,
+} from "../watch/state.js";
 
 function log(message: string): void {
   process.stderr.write(`[watch ${new Date().toISOString()}] ${message}\n`);
@@ -157,6 +168,7 @@ async function runPollLoop(
     // Merge keys acked since last poll into processedThreadIds
     state = await mergeAckJournal(stateFile, state);
     const latestProcessedByThread = buildLatestProcessedByThread(state.processedThreadIds);
+    const latestReviewRequestByThread = buildLatestReviewRequestByThread(state.reviewRequestIds ?? []);
 
     // Load per-repo poll state for conditional request headers
     const repoPollState: NotificationsPollState | undefined = state.notificationsPollState?.[repo];
@@ -224,6 +236,76 @@ async function runPollLoop(
         const processedKey = `${notification.id}:${notification.updated_at}`;
         const previousProcessedAt = latestProcessedByThread.get(notification.id);
         if (state.processedThreadIds.includes(processedKey)) continue;
+        if (notification.reason === "review_requested") {
+          if (notification.subject.type !== "PullRequest") {
+            log(`Skipping ${notification.id}: review_requested on non-PR subject, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          const pullNumber = parseSubjectNumber(notification.subject.url);
+          if (pullNumber === undefined) {
+            log(`Skipping ${notification.id}: cannot parse PR number from subject URL, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          const [repoOwner, repoName] = repo.split("/");
+          const reviewState = await fetchReviewRequestState(repoOwner, repoName, pullNumber, agent);
+          if (reviewState.transientFailure) {
+            log(`Skipping ${notification.id}: review request check failed transiently, will retry`);
+            anyTransientFailure = true;
+            continue;
+          }
+          if (!reviewState.pending || !reviewState.requestId) {
+            if (reviewState.permanentFailure) {
+              log(`Skipping ${notification.id}: review request check failed permanently, marking processed`);
+            } else {
+              log(`Skipping ${notification.id}: agent is not an active requested reviewer, marking processed`);
+            }
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          if (latestReviewRequestByThread.get(notification.id) === reviewState.requestId) {
+            log(`Skipping ${notification.id}: review request ${reviewState.requestId} already emitted`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          const latestReviewEvent = await fetchLatestReviewRequestEvent(repoOwner, repoName, pullNumber, agent);
+          if (latestReviewEvent.transientFailure) {
+            log(`Skipping ${notification.id}: review request event lookup failed transiently, will retry`);
+            anyTransientFailure = true;
+            continue;
+          }
+          if (latestReviewEvent.permanentFailure) {
+            log(`Continuing ${notification.id}: review request event lookup failed permanently, emitting without requester metadata`);
+          } else if (!latestReviewEvent.eventId) {
+            log(`Continuing ${notification.id}: no matching review_requested event found, emitting without requester metadata`);
+          }
+
+          const reviewEvent = buildMentionEvent(notification, null, agent, {
+            trigger: "review_requested",
+            reviewer: latestReviewEvent.reviewer ?? agent,
+            ...(latestReviewEvent.requester ? { requester: latestReviewEvent.requester } : {}),
+          });
+          if (!reviewEvent) {
+            log(`Skipping ${notification.id}: could not build review_requested event, marking processed`);
+            state = addProcessedId(state, processedKey);
+            latestProcessedByThread.set(notification.id, notification.updated_at);
+            continue;
+          }
+
+          process.stdout.write(JSON.stringify(reviewEvent) + "\n");
+          state = addReviewRequestId(state, notification.id, reviewState.requestId);
+          latestReviewRequestByThread.set(notification.id, reviewState.requestId);
+          continue;
+        }
 
         // Fetch the comment that triggered this notification
         const comment = notification.subject.latest_comment_url

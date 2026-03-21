@@ -47,6 +47,21 @@ export interface FetchCommentsResult {
   permanentFailure: boolean;
 }
 
+export interface ReviewRequestState {
+  pending: boolean;
+  requestId?: string;
+  permanentFailure: boolean;
+  transientFailure: boolean;
+}
+
+export interface ReviewRequestEventResult {
+  eventId?: string;
+  requester?: string;
+  reviewer?: string;
+  permanentFailure: boolean;
+  transientFailure: boolean;
+}
+
 /** Extract issue/PR number from a GitHub API subject URL (last path segment). */
 export function parseSubjectNumber(url: string): number | undefined {
   const match = url.match(/\/(\d+)$/);
@@ -372,6 +387,187 @@ export async function fetchSubjectBodyResult(subjectUrl: string): Promise<FetchD
   }
 }
 
+interface ReviewRequestsGraphqlResponse {
+  data?: {
+    repository?: {
+      pullRequest?: {
+        reviewRequests?: {
+          nodes?: Array<{
+            id: string;
+            databaseId?: number | null;
+            requestedReviewer?: {
+              __typename: string;
+              login?: string;
+            } | null;
+          }>;
+        };
+      } | null;
+    } | null;
+  };
+}
+
+interface IssueEventResponseItem {
+  id?: number;
+  event?: string;
+  created_at?: string;
+  actor?: {
+    login?: string;
+  } | null;
+  review_requester?: {
+    login?: string;
+  } | null;
+  requested_reviewer?: {
+    login?: string;
+  } | null;
+}
+
+/**
+ * Fetch the current active review-request identity for a specific user.
+ *
+ * We use the GraphQL ReviewRequest object's own identifier instead of
+ * notification.updated_at. That lets watch distinguish a real re-request
+ * from ordinary PR activity on the same thread.
+ */
+export async function fetchReviewRequestState(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  reviewer: string,
+): Promise<ReviewRequestState> {
+  const query = `
+    query($owner: String!, $repo: String!, $pullNumber: Int!) {
+      repository(owner: $owner, name: $repo) {
+        pullRequest(number: $pullNumber) {
+          reviewRequests(first: 100) {
+            nodes {
+              id
+              databaseId
+              requestedReviewer {
+                __typename
+                ... on User {
+                  login
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  try {
+    const raw = await gh([
+      "api",
+      "graphql",
+      "-F", `owner=${owner}`,
+      "-F", `repo=${repo}`,
+      "-F", `pullNumber=${pullNumber}`,
+      "-f", `query=${query}`,
+    ]);
+    const parsed = JSON.parse(raw) as ReviewRequestsGraphqlResponse;
+    const pullRequest = parsed.data?.repository?.pullRequest;
+    if (!pullRequest?.reviewRequests?.nodes) {
+      return {
+        pending: false,
+        permanentFailure: true,
+        transientFailure: false,
+      };
+    }
+
+    const match = pullRequest.reviewRequests.nodes.find((request) => (
+      request.requestedReviewer?.__typename === "User"
+      && request.requestedReviewer.login?.toLowerCase() === reviewer.toLowerCase()
+    ));
+    if (!match) {
+      return {
+        pending: false,
+        permanentFailure: false,
+        transientFailure: false,
+      };
+    }
+
+    return {
+      pending: true,
+      requestId: match.databaseId !== null && match.databaseId !== undefined
+        ? String(match.databaseId)
+        : match.id,
+      permanentFailure: false,
+      transientFailure: false,
+    };
+  } catch (err) {
+    const permanentFailure = isPermanentFetchError(err);
+    return {
+      pending: false,
+      permanentFailure,
+      transientFailure: !permanentFailure,
+    };
+  }
+}
+
+/**
+ * Fetch the most recent review_requested issue event for a reviewer on a PR.
+ *
+ * This gives watch the requester/reviewer metadata required by the event
+ * payload without using thread updated_at as the dedupe identity.
+ */
+export async function fetchLatestReviewRequestEvent(
+  owner: string,
+  repo: string,
+  pullNumber: number,
+  reviewer: string,
+): Promise<ReviewRequestEventResult> {
+  try {
+    const raw = await gh([
+      "api",
+      "--paginate",
+      "--slurp",
+      `/repos/${owner}/${repo}/issues/${pullNumber}/events?per_page=100`,
+    ]);
+    const pages = JSON.parse(raw) as IssueEventResponseItem[][];
+    const events = pages.flat();
+
+    let latest: IssueEventResponseItem | null = null;
+    for (const event of events) {
+      if (event.event !== "review_requested") continue;
+      if (event.requested_reviewer?.login?.toLowerCase() !== reviewer.toLowerCase()) continue;
+
+      if (!latest) {
+        latest = event;
+        continue;
+      }
+
+      const createdAt = event.created_at ?? "";
+      const latestCreatedAt = latest.created_at ?? "";
+      const eventId = event.id ?? 0;
+      const latestId = latest.id ?? 0;
+      if (createdAt > latestCreatedAt || (createdAt === latestCreatedAt && eventId > latestId)) {
+        latest = event;
+      }
+    }
+
+    if (!latest?.id) {
+      return {
+        permanentFailure: false,
+        transientFailure: false,
+      };
+    }
+
+    return {
+      eventId: String(latest.id),
+      requester: latest.review_requester?.login ?? latest.actor?.login,
+      reviewer: latest.requested_reviewer?.login ?? reviewer,
+      permanentFailure: false,
+      transientFailure: false,
+    };
+  } catch (err) {
+    const permanentFailure = isPermanentFetchError(err);
+    return {
+      permanentFailure,
+      transientFailure: !permanentFailure,
+    };
+  }
+}
+
 /**
  * Check if the comment body contains an @mention of the given GitHub login.
  * Case-insensitive, boundary-safe on both sides:
@@ -498,6 +694,7 @@ export function buildMentionEvent(
   notification: RawNotification,
   comment: CommentDetail | null,
   agent: string,
+  extras?: Pick<MentionEvent, "trigger" | "requester" | "reviewer">,
 ): MentionEvent | null {
   const number = parseSubjectNumber(notification.subject.url);
   if (number === undefined) return null;
@@ -513,5 +710,8 @@ export function buildMentionEvent(
     url: comment?.htmlUrl ?? "",
     threadId: notification.id,
     timestamp: notification.updated_at,
+    ...(extras?.trigger ? { trigger: extras.trigger } : {}),
+    ...(extras?.requester ? { requester: extras.requester } : {}),
+    ...(extras?.reviewer ? { reviewer: extras.reviewer } : {}),
   };
 }
