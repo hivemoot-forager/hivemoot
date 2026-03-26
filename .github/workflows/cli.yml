@@ -64,9 +64,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
-
       - name: Auto-bump version if needed
         run: |
           # Skip if this commit is itself an auto-bump (prevents trigger loop)
@@ -86,6 +83,9 @@ jobs:
             git pull --rebase origin main
             git push origin HEAD:main
           fi
+
+      - name: Build
+        run: npm run build
 
       - name: Check if version is already published
         id: check
