@@ -65,6 +65,7 @@ jobs:
         run: npm ci
 
       - name: Auto-bump version if needed
+        if: github.event_name == 'push'
         run: |
           # Skip if this commit is itself an auto-bump (prevents trigger loop)
           if git log -1 --format=%s | grep -q "^chore(cli): auto-bump version"; then
