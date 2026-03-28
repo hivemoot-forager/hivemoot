@@ -88,12 +88,10 @@ jobs:
           fi
 
       - name: Build
-        if: steps.auto_bump.outputs.bumped != 'true'
         run: npm run build
 
       - name: Check if version is already published
         id: check
-        if: steps.auto_bump.outputs.bumped != 'true'
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           PACKAGE_NAME=$(node -p "require('./package.json').name")
@@ -104,7 +102,7 @@ jobs:
           fi
 
       - name: Publish to npm
-        if: steps.auto_bump.outputs.bumped != 'true' && steps.check.outputs.published == 'false'
+        if: steps.check.outputs.published == 'false'
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
