@@ -65,6 +65,7 @@ jobs:
         run: npm ci
 
       - name: Auto-bump version if needed
+        id: auto_bump
         if: github.event_name == 'push'
         run: |
           # Skip if this commit is itself an auto-bump (prevents trigger loop)
@@ -83,13 +84,16 @@ jobs:
             git commit -m "chore(cli): auto-bump version to $(node -p "require('./package.json').version")"
             git pull --rebase origin main
             git push origin HEAD:main
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build
+        if: steps.auto_bump.outputs.bumped != 'true'
         run: npm run build
 
       - name: Check if version is already published
         id: check
+        if: steps.auto_bump.outputs.bumped != 'true'
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           PACKAGE_NAME=$(node -p "require('./package.json').name")
@@ -100,7 +104,7 @@ jobs:
           fi
 
       - name: Publish to npm
-        if: steps.check.outputs.published == 'false'
+        if: steps.auto_bump.outputs.bumped != 'true' && steps.check.outputs.published == 'false'
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
