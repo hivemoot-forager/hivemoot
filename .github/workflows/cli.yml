@@ -6,7 +6,9 @@ on:
     paths: [cli/**]
   pull_request:
     branches: [main]
-    paths: [cli/**]
+    paths:
+      - cli/**
+      - .github/workflows/cli.yml
   workflow_dispatch:
 
 jobs:
@@ -43,6 +45,9 @@ jobs:
     needs: typecheck-test-build
     if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    concurrency:
+      group: cli-publish
+      cancel-in-progress: false
     permissions:
       contents: write
     defaults:
@@ -50,8 +55,11 @@ jobs:
         working-directory: cli
 
     steps:
-      - name: Checkout
+      - name: Checkout latest main
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -66,29 +74,58 @@ jobs:
 
       - name: Auto-bump version if needed
         id: auto_bump
-        if: github.event_name == 'push'
+        # Skip if this push was the auto-bump commit itself — prevents an infinite
+        # trigger loop where the bump push re-queues a new publish job that bumps again.
+        if: "github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'chore(cli): auto-bump version')"
         run: |
-          # Skip if this commit is itself an auto-bump (prevents trigger loop)
-          if git log -1 --format=%s | grep -q "^chore(cli): auto-bump version"; then
-            echo "Skipping: triggered by auto-bump commit"
-            exit 0
-          fi
           CURRENT=$(node -p "require('./package.json').version")
           PACKAGE_NAME=$(node -p "require('./package.json').name")
           NPM_LATEST=$(npm view "${PACKAGE_NAME}" version 2>/dev/null || echo "0.0.0")
-          if [ "$CURRENT" = "$NPM_LATEST" ]; then
-            npm version patch --no-git-tag-version
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add package.json package-lock.json
-            git commit -m "chore(cli): auto-bump version to $(node -p "require('./package.json').version")"
-            git pull --rebase origin main
-            git push origin HEAD:main
-            echo "bumped=true" >> "$GITHUB_OUTPUT"
+
+          # Compute next patch version. If CURRENT is already ahead of NPM_LATEST
+          # (e.g. a manual bump in a previous PR), skip auto-bump — publish will use
+          # whatever version is already in package.json.
+          NEXT_VERSION=$(node -e '
+            const current = process.argv[1];
+            const latest = process.argv[2];
+            const parse = (v) => v.split(".").map((n) => parseInt(n, 10));
+            const isValid = (p) => p.length === 3 && p.every((n) => Number.isInteger(n) && n >= 0);
+            const compare = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+            const c = parse(current), l = parse(latest);
+            if (!isValid(c) || !isValid(l)) {
+              throw new Error("Unsupported semver: current=" + current + " latest=" + latest);
+            }
+            if (compare(c, l) > 0) { process.exit(0); }
+            l[2] += 1;
+            process.stdout.write(l.join("."));
+          ' "$CURRENT" "$NPM_LATEST")
+
+          if [ -z "$NEXT_VERSION" ]; then
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          npm version "$NEXT_VERSION" --no-git-tag-version
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git commit -m "chore(cli): auto-bump version to $(node -p "require('./package.json').version")"
+          echo "bumped=true" >> "$GITHUB_OUTPUT"
 
       - name: Build
         run: npm run build
+
+      - name: Push auto-bump commit
+        if: steps.auto_bump.outputs.bumped == 'true'
+        working-directory: .
+        run: |
+          if git push origin HEAD:main; then
+            exit 0
+          fi
+          # Another commit landed while we were building — rebase and retry.
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
 
       - name: Check if version is already published
         id: check
