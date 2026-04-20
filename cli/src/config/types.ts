@@ -5,8 +5,26 @@ export interface RoleConfig {
   instructions: string;
 }
 
+export interface FocusMatchFilter {
+  include?: string[];
+  exclude?: string[];
+}
+
+export interface FocusFilters {
+  labels?: FocusMatchFilter;
+  authors?: FocusMatchFilter;
+}
+
+export interface NormalizedFocusFilters {
+  labelInclude?: Set<string>;
+  labelExclude?: Set<string>;
+  authorInclude?: Set<string>;
+  authorExclude?: Set<string>;
+}
+
 export interface FocusBlock {
   objective: string;
+  filters?: FocusFilters;
 }
 
 export interface TeamConfig {
@@ -14,6 +32,7 @@ export interface TeamConfig {
   onboarding?: string;
   roles: Record<string, RoleConfig>;
   focus?: string;
+  focusFilters?: FocusFilters;
 }
 
 export interface HivemootConfig {
