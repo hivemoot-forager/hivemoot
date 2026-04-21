@@ -28,16 +28,17 @@ describe("GET /api/health", () => {
 
   const env = () => process.env as MutableEnv;
 
-  it("returns 200 with status ok in development", () => {
+  it("returns 200 with env field in development", () => {
     delete env().NODE_ENV;
 
     const response = GET() as unknown as { body: Record<string, unknown>; status: number };
     expect(response.status).toBe(200);
     expect(response.body.status).toBe("ok");
+    expect(response.body.env).toBe("development");
     expect(response.body.timestamp).toBeDefined();
   });
 
-  it("returns 503 with missing vars in production", () => {
+  it("returns 503 without exposing missing vars in production", () => {
     env().NODE_ENV = "production";
     delete env().HIVEMOOT_REDIS_REST_URL;
     delete env().HIVEMOOT_REDIS_REST_TOKEN;
@@ -52,20 +53,10 @@ describe("GET /api/health", () => {
     const response = GET() as unknown as { body: Record<string, unknown>; status: number };
     expect(response.status).toBe(503);
     expect(response.body.status).toBe("error");
-    expect(response.body.missing).toEqual([
-      "HIVEMOOT_REDIS_REST_URL",
-      "HIVEMOOT_REDIS_REST_TOKEN",
-      "GITHUB_APP_ID",
-      "GITHUB_APP_PRIVATE_KEY",
-      "GITHUB_CLIENT_ID",
-      "GITHUB_CLIENT_SECRET",
-      "BYOK_ACTIVE_KEY_VERSION",
-      "BYOK_MASTER_KEYS",
-      "NEXT_PUBLIC_SITE_URL",
-    ]);
+    expect(response.body.missing).toBeUndefined();
   });
 
-  it("returns 200 in production when all vars present", () => {
+  it("returns 200 without env field in production", () => {
     env().NODE_ENV = "production";
     env().HIVEMOOT_REDIS_REST_URL = "https://example.upstash.io";
     env().HIVEMOOT_REDIS_REST_TOKEN = "test-token";
@@ -75,13 +66,13 @@ describe("GET /api/health", () => {
     env().GITHUB_CLIENT_SECRET = "secret";
     env().BYOK_ACTIVE_KEY_VERSION = "v1";
     env().BYOK_MASTER_KEYS = '{"v1":"' + "a".repeat(64) + '"}';
-
     env().NEXT_PUBLIC_SITE_URL = "https://hivemoot.dev";
 
     const response = GET() as unknown as { body: Record<string, unknown>; status: number };
     expect(response.status).toBe(200);
     expect(response.body.status).toBe("ok");
-    expect(response.body.env).toBe("production");
+    expect(response.body.env).toBeUndefined();
+    expect(response.body.timestamp).toBeDefined();
   });
 
 });
